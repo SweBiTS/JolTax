@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taxatree"
+version = "0.1.0"
+authors = [
+  { name="Daniel Svensson", email="daniel.svensson@umu.se" },
+]
+description = "A high-performance, vectorized NCBI taxonomy library for rapid research and large-scale data annotation."
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = [
+    "numpy>=1.20.0",
+    "pandas>=1.3.0",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/danisven/taxatree"
+
+[tool.setuptools]
+packages = ["taxatree"]
