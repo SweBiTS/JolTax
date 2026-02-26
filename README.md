@@ -1,55 +1,48 @@
 # taxatree
 
-A high-performance, vectorized NCBI taxonomy library designed for large-scale bioinformatics research.
+**High-performance, vectorized NCBI taxonomy library for large-scale bioinformatics research.**
 
-## Features
+`taxatree` is a Python library designed to handle the massive NCBI taxonomy (and derivatives like GTDB) with extreme efficiency. By replacing traditional object-oriented trees with contiguous NumPy arrays, it achieves lightning-fast traversals, constant-time clade queries, and rapid mass annotation of large datasets.
 
-- **Vectorized Performance:** Uses NumPy arrays for O(1) property lookups and rapid batch operations.
-- **Mass Annotation:** Annotate hundreds of thousands of TaxIDs with names and canonical lineages in seconds.
-- **Advanced Tree Operations:**
-  - **Euler Tour Indexing:** Constant-time clade range queries.
-  - **Binary Lifting:** Logarithmic-time Lowest Common Ancestor (LCA) and distance calculations.
-- **Efficient Memory Management:** Can save/load pre-processed binary caches to eliminate parsing delays (DMP files).
-- **Service-Ready:** Optimized for high-concurrency research servers.
+## Key Features
 
-## Installation
-
-```bash
-pip install .
-```
-
-Requires:
-- Python >= 3.8
-- numpy
-- pandas
+- **Vectorized Performance:** Uses hardware-accelerated NumPy operations for O(1) property lookups.
+- **2025 Taxonomy Ready:** Native support for the recent NCBI/GTDB shift from `superkingdom` to `domain`.
+- **Euler Tour Indexing:** Instant clade range queries (even for millions of nodes).
+- **Binary Lifting (Skip Tables):** Logarithmic-time Lowest Common Ancestor (LCA) and distance calculations.
+- **Mass Annotation:** Annotate tables with 200,000+ rows in under a second.
+- **Full Provenance:** Binary caches store build timestamps, source file paths, and package versions for reproducible research.
 
 ## Quick Start
 
 ```python
 from taxatree import TaxonomyTree
 
-# Build from NCBI DMP files
+# Build and process the NCBI taxonomy
 tree = TaxonomyTree(nodes_file='nodes.dmp', names_file='names.dmp')
 
-# Or load from a pre-built binary cache
-# tree = TaxonomyTree.load('taxonomy_cache')
+# Save for instant loading next time
+tree.save('my_taxonomy_cache')
 
-# Get full lineage for a TaxID
-lineage = tree.get_lineage(562)  # [1, 2, 1224, ..., 562]
+# Re-load in seconds
+tree = TaxonomyTree.load('my_taxonomy_cache')
 
-# Mass annotation of a list of TaxIDs
-import pandas as pd
-tax_ids = [562, 561, 1236]
-df = tree.annotate_table(tax_ids)
-print(df)
+# Get a lineage
+lineage = tree.get_lineage(9606)  # [1, ..., 9606]
 
-# Fast clade query
-bacteria_clade = tree.get_clade(2)  # Returns a NumPy array of all TaxIDs in Bacteria
-
-# Save binary cache for faster loading next time
-tree.save('taxonomy_cache')
+# Get all genera in the Bacteria clade
+bacteria_genera = tree.get_clade_at_rank(2, 'genus')
 ```
 
-## Why use taxatree?
+## Installation
 
-Traditional object-oriented taxonomy trees in Python (storing each node as a Python object) can consume several gigabytes of RAM and take minutes to load the full NCBI taxonomy. `taxatree` uses contiguous memory, reducing RAM overhead by up to 90% and making tree traversals hardware-accelerated.
+```bash
+cd taxatree
+pip install .
+```
+
+Requires: `numpy`, `pandas`.
+
+## Documentation
+
+For a detailed API reference and a comprehensive "How-To" guide with example workflows, please see [USAGE.md](./USAGE.md).

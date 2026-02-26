@@ -4,8 +4,11 @@ taxatree/tree.py
 Implementation of a high-performance, vectorized taxonomy tree.
 """
 
+__version__ = "0.1.0"
+
 import logging
 import os
+import datetime
 from typing import Dict, List, Optional, Set, Union, Tuple
 from collections import namedtuple
 
@@ -20,13 +23,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Standard canonical ranks in order
-CANONICAL_RANKS = ['superkingdom', 'kingdom', 'phylum', 'class', 'order', 'family', 'genus', 'species']
-RankInfo = namedtuple('RankInfo', ['rank_name', 'rank_code', 'rank_depth'])
+# Standard canonical ranks in order (highest to lowest)
+# Including both superkingdom and domain for compatibility with pre/post-2025 taxonomies
+CANONICAL_RANKS = [
+    'superkingdom', 'domain', 'kingdom', 'phylum', 
+    'class', 'order', 'family', 'genus', 'species'
+]
 
 # Mapping rank names to standard Kraken-style codes
 RANK_TO_CODE = {
     'superkingdom': 'D',
+    'domain': 'D',
     'kingdom': 'K',
     'phylum': 'P',
     'class': 'C',
@@ -65,6 +72,10 @@ class TaxonomyTree:
         # Metadata storage
         self.names: Dict[int, str] = {}
         self.rank_names: List[str] = []
+        self.top_rank: str = "domain"  # Default, will be detected
+        self._source_nodes: Optional[str] = None
+        self._source_names: Optional[str] = None
+        self._build_time: Optional[str] = None
         
         # Clade query support (Euler Tour timestamps)
         self.entry_times: np.ndarray = np.array([], dtype=np.int32)
@@ -84,15 +95,18 @@ class TaxonomyTree:
             nodes_file: Path to NCBI nodes.dmp
             names_file: Path to NCBI names.dmp
         """
-        logger.info("Starting taxonomy build from DMP files...")
+        self._source_nodes = os.path.abspath(nodes_file)
+        self._source_names = os.path.abspath(names_file)
+        self._build_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        logger.info(f"Starting taxonomy build at {self._build_time}...")
         
         # 1. Parse Names
         logger.info(f"Parsing names from {names_file}...")
         raw_names = {}
         with open(names_file, 'r') as f:
-            for line in f:
-                if 'scientific name' in line:
-                    parts = line.split('|')
+            for name_line in f:
+                if 'scientific name' in name_line:
+                    parts = name_line.split('|')
                     tax_id = int(parts[0].strip())
                     name = parts[1].strip()
                     raw_names[tax_id] = name
@@ -114,6 +128,14 @@ class TaxonomyTree:
                 temp_ranks[tax_id] = rank
                 all_ranks.add(rank)
         
+        # 2.1 Detect top rank (superkingdom vs domain)
+        has_sk = 'superkingdom' in all_ranks
+        has_dm = 'domain' in all_ranks
+        if has_sk and has_dm:
+            raise ValueError("Found both 'superkingdom' and 'domain' ranks. The taxonomy must use only one as the top rank.")
+        self.top_rank = 'superkingdom' if has_sk else 'domain'
+        logger.info(f"Detected top rank: {self.top_rank}")
+
         # 3. Create dense mapping
         logger.info("Creating dense mapping and vectorized arrays...")
         sorted_tax_ids = sorted(temp_parents.keys())
@@ -193,6 +215,7 @@ class TaxonomyTree:
     def get_lineage(self, tax_id: int) -> List[int]:
         """Returns the full lineage from root to the given TaxID."""
         if tax_id not in self._id_to_index:
+            logger.warning(f"TaxID {tax_id} not found in taxonomy tree.")
             return []
         
         idx = self._id_to_index[tax_id]
@@ -200,17 +223,18 @@ class TaxonomyTree:
         root_idx = self._id_to_index[1]
         
         while True:
-            lineage.append(self._index_to_id[idx])
+            lineage.append(int(self._index_to_id[idx]))
             if idx == root_idx:
                 break
             idx = self.parents[idx]
             
         return lineage[::-1]
 
-    def get_clade(self, tax_id: int) -> np.ndarray:
+    def get_clade(self, tax_id: int) -> List[int]:
         """Returns all TaxIDs in the clade rooted at the given TaxID."""
         if tax_id not in self._id_to_index:
-            return np.array([], dtype=np.int32)
+            logger.warning(f"TaxID {tax_id} not found in taxonomy tree.")
+            return []
         
         idx = self._id_to_index[tax_id]
         entry = self.entry_times[idx]
@@ -218,11 +242,39 @@ class TaxonomyTree:
         
         # Vectorized range check
         mask = (self.entry_times >= entry) & (self.entry_times <= exit)
-        return self._index_to_id[mask]
+        return self._index_to_id[mask].astype(int).tolist()
+
+    def get_clade_at_rank(self, tax_id: int, rank_name: str) -> List[int]:
+        """
+        Returns all TaxIDs of a specific rank within the clade rooted at tax_id.
+        Efficiently filters thousands of nodes using vectorized operations.
+        """
+        if tax_id not in self._id_to_index:
+            logger.warning(f"TaxID {tax_id} not found in taxonomy tree.")
+            return []
+        
+        # Determine the internal integer index for the target rank name
+        try:
+            target_rank_idx = self.rank_names.index(rank_name)
+        except ValueError:
+            logger.warning(f"Rank '{rank_name}' not found in taxonomy. Available ranks: {self.rank_names}")
+            return []
+        
+        idx = self._id_to_index[tax_id]
+        entry = self.entry_times[idx]
+        exit = self.exit_times[idx]
+        
+        # Combined vectorized filter: Range check (clade) AND Rank match
+        mask = (self.entry_times >= entry) & (self.entry_times <= exit) & (self.ranks == target_rank_idx)
+        return self._index_to_id[mask].astype(int).tolist()
 
     def get_lca(self, tax_id_1: int, tax_id_2: int) -> int:
         """Finds the Lowest Common Ancestor using Binary Lifting."""
-        if tax_id_1 not in self._id_to_index or tax_id_2 not in self._id_to_index:
+        if tax_id_1 not in self._id_to_index:
+            logger.warning(f"TaxID {tax_id_1} not found in taxonomy tree.")
+            return 1
+        if tax_id_2 not in self._id_to_index:
+            logger.warning(f"TaxID {tax_id_2} not found in taxonomy tree.")
             return 1
             
         self._ensure_up_table()
@@ -239,7 +291,7 @@ class TaxonomyTree:
                 idx1 = self._up_table[idx1, i]
                 
         if idx1 == idx2:
-            return self._index_to_id[idx1]
+            return int(self._index_to_id[idx1])
             
         # Lift both until they share a parent
         for i in reversed(range(self._up_table.shape[1])):
@@ -247,7 +299,7 @@ class TaxonomyTree:
                 idx1 = self._up_table[idx1, i]
                 idx2 = self._up_table[idx2, i]
                 
-        return self._index_to_id[self.parents[idx1]]
+        return int(self._index_to_id[self.parents[idx1]])
 
     def get_distance(self, tax_id_1: int, tax_id_2: int) -> int:
         """Calculates distance (number of edges) between two TaxIDs."""
@@ -261,47 +313,63 @@ class TaxonomyTree:
 
     def annotate_table(self, tax_ids: Union[List[int], np.ndarray]) -> pd.DataFrame:
         """
-        Massively annotates a list of TaxIDs with names and canonical ranks.
+        Massively annotates a list of TaxIDs with scientific_names and canonical ranks.
         Extremely efficient for large tables (e.g. 200k+ rows).
         """
         logger.info(f"Annotating {len(tax_ids)} taxa...")
+        
+        # Build the set of canonical ranks to use for this taxonomy
+        # We start with self.top_rank and then add everything from kingdom down to species
+        canonical_columns = [self.top_rank] + [r for r in CANONICAL_RANKS if r not in ['superkingdom', 'domain']]
         
         data = []
         # Convert input to internal indices, handling unknowns
         indices = [self._id_to_index.get(tid, -1) for tid in tax_ids]
         
-        # Pre-lookup table for the standard ranks we care about
-        # This could be further vectorized if needed
         for tid, idx in zip(tax_ids, indices):
             if idx == -1:
-                data.append({"tax_id": tid, "name": "Unknown", "rank": "unclassified"})
+                row = {"tax_id": tid, "scientific_name": "Unknown", "rank": "unclassified"}
+                # Pre-populate all canonical ranks with None for this row
+                for rank in canonical_columns:
+                    row[rank] = None
+                data.append(row)
                 continue
             
             row = {
                 "tax_id": tid,
-                "name": self.names.get(tid, f"ID_{tid}"),
+                "scientific_name": self.names.get(tid, f"ID_{tid}"),
                 "rank": self.rank_names[self.ranks[idx]]
             }
             
-            # Find canonical ancestors
-            # Optimization: we can pre-calculate these if this is used very often
-            curr_idx = idx
-            found_ranks = {}
+            # Pre-populate all canonical ranks with None
+            for rank in canonical_columns:
+                row[rank] = None
             
             # Walk up to find canonicals
+            curr_idx = idx
+            root_idx = self._id_to_index[1]
             while True:
                 rank_name = self.rank_names[self.ranks[curr_idx]]
-                if rank_name in CANONICAL_RANKS:
-                    found_ranks[rank_name] = self.names.get(self._index_to_id[curr_idx])
                 
-                if curr_idx == self._id_to_index[1]:
+                # Normalize superkingdom/domain based on detected top_rank
+                mapped_rank = rank_name
+                if rank_name in ['superkingdom', 'domain']:
+                    mapped_rank = self.top_rank
+                
+                if mapped_rank in canonical_columns:
+                    row[mapped_rank] = self.names.get(self._index_to_id[curr_idx])
+                
+                if curr_idx == root_idx:
                     break
                 curr_idx = self.parents[curr_idx]
             
-            row.update(found_ranks)
             data.append(row)
             
-        return pd.DataFrame(data)
+        df = pd.DataFrame(data)
+        
+        # Define final column order: tax_id, then canonical ranks, then scientific_name, then rank
+        final_order = ['tax_id'] + canonical_columns + ['scientific_name', 'rank']
+        return df[final_order]
 
     def _ensure_up_table(self) -> None:
         """Lazy initialization of binary lifting table."""
@@ -341,7 +409,16 @@ class TaxonomyTree:
             pickle.dump({
                 "names": self.names,
                 "rank_names": self.rank_names,
-                "id_to_index": self._id_to_index
+                "id_to_index": self._id_to_index,
+                "top_rank": self.top_rank,
+                "provenance": {
+                    "build_time": self._build_time,
+                    "source_nodes": self._source_nodes,
+                    "source_names": self._source_names,
+                    "package_version": __version__,
+                    "node_count": len(self._index_to_id),
+                    "max_depth": int(np.max(self.depths))
+                }
             }, f)
 
     @classmethod
@@ -362,5 +439,20 @@ class TaxonomyTree:
             tree.names = meta["names"]
             tree.rank_names = meta["rank_names"]
             tree._id_to_index = meta["id_to_index"]
+            tree.top_rank = meta.get("top_rank", "domain")
+            
+            # Load provenance
+            prov = meta.get("provenance", {})
+            tree._build_time = prov.get("build_time")
+            tree._source_nodes = prov.get("source_nodes")
+            tree._source_names = prov.get("source_names")
+            
+            logger.info("Loaded taxonomy cache:")
+            logger.info(f"  Build time:    {tree._build_time}")
+            logger.info(f"  Source Nodes:  {tree._source_nodes}")
+            logger.info(f"  Source Names:  {tree._source_names}")
+            logger.info(f"  Node count:    {prov.get('node_count', 'Unknown'):,}")
+            logger.info(f"  Tree depth:    {prov.get('max_depth', 'Unknown')}")
+            logger.info(f"  Top rank:      {tree.top_rank}")
             
         return tree
