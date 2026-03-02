@@ -14,6 +14,7 @@ from collections import namedtuple
 
 import numpy as np
 import pandas as pd
+import polars as pl
 
 # Set up logging for the module
 logging.basicConfig(
@@ -83,6 +84,10 @@ class TaxonomyTree:
         
         # Binary lifting table for LCA (initialized on demand)
         self._up_table: Optional[np.ndarray] = None
+        
+        # Pre-calculated canonical rank maps (dense internal index -> TaxID)
+        # Dictionary mapping rank name to np.ndarray of shape (num_nodes,)
+        self.canonical_maps: Dict[str, np.ndarray] = {}
         
         if nodes_file and names_file:
             self.build_from_dmp(nodes_file, names_file)
@@ -169,8 +174,42 @@ class TaxonomyTree:
             
         # 5. Build Euler Tour for clade queries
         self._build_euler_tour()
+
+        # 6. Pre-calculate canonical rank maps
+        self._build_canonical_maps()
         
         logger.info("Taxonomy build complete.")
+
+    def _build_canonical_maps(self) -> None:
+        """Pre-calculates canonical rank ancestors for all nodes."""
+        logger.info("Pre-calculating canonical rank maps...")
+        num_nodes = len(self._index_to_id)
+        
+        # Identify all canonical ranks to track
+        canonical_columns = [self.top_rank] + [r for r in CANONICAL_RANKS if r not in ['superkingdom', 'domain']]
+        
+        # Initialize maps with -1 (meaning no ancestor at that rank)
+        self.canonical_maps = {rank: np.full(num_nodes, -1, dtype=np.int32) for rank in canonical_columns}
+        
+        # Sort nodes by depth to ensure parents are processed before children
+        # (Though we can also just walk up for each node, which is simpler to implement)
+        for i in range(num_nodes):
+            curr_idx = i
+            root_idx = self._id_to_index[1]
+            while True:
+                rank_name = self.rank_names[self.ranks[curr_idx]]
+                
+                # Normalize superkingdom/domain based on detected top_rank
+                mapped_rank = rank_name
+                if rank_name in ['superkingdom', 'domain']:
+                    mapped_rank = self.top_rank
+                
+                if mapped_rank in self.canonical_maps:
+                    self.canonical_maps[mapped_rank][i] = self._index_to_id[curr_idx]
+                
+                if curr_idx == root_idx:
+                    break
+                curr_idx = self.parents[curr_idx]
 
     def _calculate_depth(self, index: int) -> int:
         """Recursive depth calculation with memoization."""
@@ -229,6 +268,18 @@ class TaxonomyTree:
             idx = self.parents[idx]
             
         return lineage[::-1]
+
+    def get_name(self, tax_id: int) -> str:
+        """Returns the scientific name of the given TaxID."""
+        return self.names.get(tax_id, f"Unknown_{tax_id}")
+
+    def get_rank(self, tax_id: int) -> str:
+        """Returns the taxonomic rank of the given TaxID."""
+        if tax_id not in self._id_to_index:
+            logger.warning(f"TaxID {tax_id} not found in taxonomy tree.")
+            return "unknown"
+        idx = self._id_to_index[tax_id]
+        return self.rank_names[self.ranks[idx]]
 
     def get_clade(self, tax_id: int) -> List[int]:
         """Returns all TaxIDs in the clade rooted at the given TaxID."""
@@ -311,65 +362,45 @@ class TaxonomyTree:
         
         return int(self.depths[idx1] + self.depths[idx2] - 2 * self.depths[idx_lca])
 
-    def annotate_table(self, tax_ids: Union[List[int], np.ndarray]) -> pd.DataFrame:
+    def annotate_table(self, tax_ids: Union[List[int], np.ndarray]) -> pl.DataFrame:
         """
         Massively annotates a list of TaxIDs with scientific_names and canonical ranks.
-        Extremely efficient for large tables (e.g. 200k+ rows).
+        Extremely efficient for large tables (e.g. 200k+ rows) using Polars and vectorized lookups.
         """
         logger.info(f"Annotating {len(tax_ids)} taxa...")
         
         # Build the set of canonical ranks to use for this taxonomy
-        # We start with self.top_rank and then add everything from kingdom down to species
         canonical_columns = [self.top_rank] + [r for r in CANONICAL_RANKS if r not in ['superkingdom', 'domain']]
         
-        data = []
-        # Convert input to internal indices, handling unknowns
-        indices = [self._id_to_index.get(tid, -1) for tid in tax_ids]
+        # Convert input to numpy array for efficient processing
+        tax_ids_arr = np.array(tax_ids, dtype=np.int32)
         
-        for tid, idx in zip(tax_ids, indices):
-            if idx == -1:
-                row = {"tax_id": tid, "scientific_name": "Unknown", "rank": "unclassified"}
-                # Pre-populate all canonical ranks with None for this row
-                for rank in canonical_columns:
-                    row[rank] = None
-                data.append(row)
-                continue
+        # Get internal indices
+        indices = np.array([self._id_to_index.get(tid, -1) for tid in tax_ids_arr], dtype=np.int32)
+        valid_mask = indices != -1
+        
+        # Prepare the base dictionary for Polars
+        df_dict = {"tax_id": tax_ids_arr}
+        
+        # Vectorized lookup for each canonical rank
+        for rank in canonical_columns:
+            # Map indices to ancestor TaxIDs using pre-calculated maps
+            ancestor_ids = np.full(len(tax_ids_arr), -1, dtype=np.int32)
+            ancestor_ids[valid_mask] = self.canonical_maps[rank][indices[valid_mask]]
             
-            row = {
-                "tax_id": tid,
-                "scientific_name": self.names.get(tid, f"ID_{tid}"),
-                "rank": self.rank_names[self.ranks[idx]]
-            }
-            
-            # Pre-populate all canonical ranks with None
-            for rank in canonical_columns:
-                row[rank] = None
-            
-            # Walk up to find canonicals
-            curr_idx = idx
-            root_idx = self._id_to_index[1]
-            while True:
-                rank_name = self.rank_names[self.ranks[curr_idx]]
-                
-                # Normalize superkingdom/domain based on detected top_rank
-                mapped_rank = rank_name
-                if rank_name in ['superkingdom', 'domain']:
-                    mapped_rank = self.top_rank
-                
-                if mapped_rank in canonical_columns:
-                    row[mapped_rank] = self.names.get(self._index_to_id[curr_idx])
-                
-                if curr_idx == root_idx:
-                    break
-                curr_idx = self.parents[curr_idx]
-            
-            data.append(row)
-            
-        df = pd.DataFrame(data)
+            # Map TaxIDs to Names using a dictionary lookup
+            # (In Polars we can use map_dict for high performance)
+            df_dict[rank] = [self.names.get(int(tid)) if tid != -1 else None for tid in ancestor_ids]
+
+        # Add scientific_name and rank for the tax_id itself
+        df_dict["scientific_name"] = [self.names.get(int(tid), "Unknown") if tid != -1 else "Unknown" for tid in tax_ids_arr]
+        df_dict["rank"] = [self.rank_names[self.ranks[idx]] if idx != -1 else "unclassified" for idx in indices]
+        
+        df = pl.DataFrame(df_dict)
         
         # Define final column order: tax_id, then canonical ranks, then scientific_name, then rank
         final_order = ['tax_id'] + canonical_columns + ['scientific_name', 'rank']
-        return df[final_order]
+        return df.select(final_order)
 
     def _ensure_up_table(self) -> None:
         """Lazy initialization of binary lifting table."""
@@ -404,6 +435,13 @@ class TaxonomyTree:
         np.save(os.path.join(directory, "entry_times.npy"), self.entry_times)
         np.save(os.path.join(directory, "exit_times.npy"), self.exit_times)
         
+        # Save canonical maps
+        maps_dir = os.path.join(directory, "canonical_maps")
+        if not os.path.exists(maps_dir):
+            os.makedirs(maps_dir)
+        for rank, arr in self.canonical_maps.items():
+            np.save(os.path.join(maps_dir, f"{rank}.npy"), arr)
+            
         import pickle
         with open(os.path.join(directory, "metadata.pkl"), 'wb') as f:
             pickle.dump({
@@ -432,6 +470,14 @@ class TaxonomyTree:
         tree.ranks = np.load(os.path.join(directory, "ranks.npy"))
         tree.entry_times = np.load(os.path.join(directory, "entry_times.npy"))
         tree.exit_times = np.load(os.path.join(directory, "exit_times.npy"))
+        
+        # Load canonical maps
+        maps_dir = os.path.join(directory, "canonical_maps")
+        if os.path.exists(maps_dir):
+            for filename in os.listdir(maps_dir):
+                if filename.endswith(".npy"):
+                    rank = filename[:-4]
+                    tree.canonical_maps[rank] = np.load(os.path.join(maps_dir, filename))
         
         import pickle
         with open(os.path.join(directory, "metadata.pkl"), 'rb') as f:

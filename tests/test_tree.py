@@ -3,6 +3,7 @@ import os
 import sys
 import numpy as np
 import pandas as pd
+import polars as pl
 
 # Add the project root to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -48,15 +49,28 @@ class TestTaxonomyTree(unittest.TestCase):
         # 562 to 2 is 6 steps
         self.assertEqual(self.tree.get_distance(562, 2), 6)
 
+    def test_get_name_and_rank(self):
+        self.assertEqual(self.tree.get_name(562), 'Escherichia coli')
+        self.assertEqual(self.tree.get_rank(562), 'species')
+        self.assertEqual(self.tree.get_name(2), 'Bacteria')
+        self.assertEqual(self.tree.get_rank(2), 'superkingdom')
+        # Test unknown
+        self.assertEqual(self.tree.get_name(999999), 'Unknown_999999')
+        self.assertEqual(self.tree.get_rank(999999), 'unknown')
+
     def test_annotate_table(self):
         tax_ids = [562, 561, 2]
         df = self.tree.annotate_table(tax_ids)
-        self.assertIsInstance(df, pd.DataFrame)
+        self.assertIsInstance(df, pl.DataFrame)
         self.assertEqual(len(df), 3)
         self.assertIn('species', df.columns)
         self.assertIn('genus', df.columns)
-        self.assertEqual(df.iloc[0]['species'], 'Escherichia coli')
-        self.assertEqual(df.iloc[0]['genus'], 'Escherichia')
+        
+        # Check first row (562)
+        row0 = df.row(0, named=True)
+        self.assertEqual(row0['species'], 'Escherichia coli')
+        self.assertEqual(row0['genus'], 'Escherichia')
+        self.assertEqual(row0['scientific_name'], 'Escherichia coli')
 
     def test_save_load(self):
         import shutil
@@ -68,13 +82,16 @@ class TestTaxonomyTree(unittest.TestCase):
         new_tree = TaxonomyTree.load(cache_dir)
         
         self.assertEqual(new_tree.get_lineage(562), self.tree.get_lineage(562))
+        # Check canonical maps loaded
+        self.assertIn(self.tree.top_rank, new_tree.canonical_maps)
+        
         shutil.rmtree(cache_dir)
 
 if __name__ == '__main__':
-    # We skip tests if numpy/pandas aren't installed in the test environment
+    # We skip tests if dependencies aren't installed
     try:
         import numpy
-        import pandas
+        import polars
         unittest.main()
     except ImportError:
-        print("Skipping tests due to missing numpy/pandas.")
+        print("Skipping tests due to missing dependencies.")
