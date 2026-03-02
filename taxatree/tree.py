@@ -6,6 +6,10 @@ Implementation of a high-performance, vectorized taxonomy tree.
 
 __version__ = "0.1.0"
 
+# The minimum version of a saved taxonomy cache that is compatible with this software.
+# Increment this when making breaking changes to the binary layout or metadata structure.
+MINIMUM_CACHE_VERSION = "0.1.0"
+
 import logging
 import os
 import datetime
@@ -463,7 +467,38 @@ class TaxonomyTree:
     def load(cls, directory: str) -> 'TaxonomyTree':
         """Loads the vectorized tree from a binary cache directory."""
         logger.info(f"Loading binary cache from {directory}...")
-        tree = cls()
+        
+        import pickle
+        with open(os.path.join(directory, "metadata.pkl"), 'rb') as f:
+            meta = pickle.load(f)
+            
+            # Version Validation
+            prov = meta.get("provenance", {})
+            saved_version = prov.get("package_version", "unknown")
+            
+            def version_to_tuple(v):
+                try:
+                    return tuple(map(int, v.split('.')))
+                except (ValueError, AttributeError):
+                    return (0, 0, 0)
+            
+            if version_to_tuple(saved_version) < version_to_tuple(MINIMUM_CACHE_VERSION):
+                raise RuntimeError(
+                    f"Incompatible taxonomy cache. Saved version: {saved_version}, "
+                    f"Minimum required: {MINIMUM_CACHE_VERSION}. Please rebuild with build_from_dmp()."
+                )
+
+            tree = cls()
+            tree.names = meta["names"]
+            tree.rank_names = meta["rank_names"]
+            tree._id_to_index = meta["id_to_index"]
+            tree.top_rank = meta.get("top_rank", "domain")
+            
+            # Load provenance
+            tree._build_time = prov.get("build_time")
+            tree._source_nodes = prov.get("source_nodes")
+            tree._source_names = prov.get("source_names")
+
         tree._index_to_id = np.load(os.path.join(directory, "index_to_id.npy"))
         tree.parents = np.load(os.path.join(directory, "parents.npy"))
         tree.depths = np.load(os.path.join(directory, "depths.npy"))
@@ -479,26 +514,10 @@ class TaxonomyTree:
                     rank = filename[:-4]
                     tree.canonical_maps[rank] = np.load(os.path.join(maps_dir, filename))
         
-        import pickle
-        with open(os.path.join(directory, "metadata.pkl"), 'rb') as f:
-            meta = pickle.load(f)
-            tree.names = meta["names"]
-            tree.rank_names = meta["rank_names"]
-            tree._id_to_index = meta["id_to_index"]
-            tree.top_rank = meta.get("top_rank", "domain")
-            
-            # Load provenance
-            prov = meta.get("provenance", {})
-            tree._build_time = prov.get("build_time")
-            tree._source_nodes = prov.get("source_nodes")
-            tree._source_names = prov.get("source_names")
-            
-            logger.info("Loaded taxonomy cache:")
-            logger.info(f"  Build time:    {tree._build_time}")
-            logger.info(f"  Source Nodes:  {tree._source_nodes}")
-            logger.info(f"  Source Names:  {tree._source_names}")
-            logger.info(f"  Node count:    {prov.get('node_count', 'Unknown'):,}")
-            logger.info(f"  Tree depth:    {prov.get('max_depth', 'Unknown')}")
-            logger.info(f"  Top rank:      {tree.top_rank}")
+        logger.info("Loaded taxonomy cache:")
+        logger.info(f"  Version:       {saved_version}")
+        logger.info(f"  Build time:    {tree._build_time}")
+        logger.info(f"  Node count:    {prov.get('node_count', 'Unknown'):,}")
+        logger.info(f"  Top rank:      {tree.top_rank}")
             
         return tree

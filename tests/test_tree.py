@@ -87,6 +87,32 @@ class TestTaxonomyTree(unittest.TestCase):
         
         shutil.rmtree(cache_dir)
 
+    def test_version_validation(self):
+        import shutil
+        import pickle
+        cache_dir = 'tests/version_test'
+        if os.path.exists(cache_dir):
+            shutil.rmtree(cache_dir)
+            
+        self.tree.save(cache_dir)
+        
+        # Manually corrupt metadata with old version
+        meta_path = os.path.join(cache_dir, "metadata.pkl")
+        with open(meta_path, 'rb') as f:
+            meta = pickle.load(f)
+        
+        meta["provenance"]["package_version"] = "0.0.1" # Older than 0.1.0
+        
+        with open(meta_path, 'wb') as f:
+            pickle.dump(meta, f)
+            
+        # Should raise RuntimeError
+        with self.assertRaises(RuntimeError) as cm:
+            TaxonomyTree.load(cache_dir)
+        
+        self.assertIn("Incompatible taxonomy cache", str(cm.exception))
+        shutil.rmtree(cache_dir)
+
 if __name__ == '__main__':
     # We skip tests if dependencies aren't installed
     try:
