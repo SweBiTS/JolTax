@@ -115,7 +115,7 @@ import numpy as np
 tax_ids = np.random.choice(tree._index_to_id, 1000000)
 
 # Mass annotation (under 1 second)
-df = tree.annotate_table(tax_ids)
+df = tree.annotate(tax_ids)
 
 # Save to Parquet or CSV using Polars
 df.write_parquet("annotated_results.parquet")
@@ -128,7 +128,7 @@ Because `joltax` methods are designed to return standardized types (lists of int
 # Example: Get a full taxonomic table for every genus within the Bacteria clade (TaxID: 2)
 # and immediately save it as a CSV (using Polars one-liners)
 (
-    tree.annotate_table(tree.get_clade_at_rank(2, 'genus'))
+    tree.annotate(tree.get_clade_at_rank(2, 'genus'))
     .write_csv("bacterial_genera.csv")
 )
 ```
@@ -200,7 +200,7 @@ Vectorized batch distance calculation. If `strict=False`, missing IDs result in 
 
 ### Mass Operations
 
-#### `annotate_table(tax_ids: List[int], strict: bool = True) -> polars.DataFrame`
+#### `annotate(tax_ids: Union[int, List[int], np.ndarray], strict: bool = True) -> polars.DataFrame`
 Produces a formatted Polars DataFrame. If `strict=False`, rows with missing TaxIDs will have `null` values for all metadata columns.
 
 ---
@@ -211,4 +211,4 @@ As of early 2025, the NCBI Taxonomy has shifted away from `superkingdom` in favo
 `joltax` handles this by:
 1. **Auto-Detection:** During the build, it identifies which rank is used as the top level.
 2. **Mutual Exclusivity:** It enforces that a taxonomy uses either `superkingdom` OR `domain` as its top-level identifier, but not both.
-3. **Dynamic Columns:** The `annotate_table` output dynamically renames its first taxonomic column based on what it detected in your specific database.
+3. **Dynamic Columns:** The `annotate` output dynamically renames its first taxonomic column based on what it detected in your specific database.

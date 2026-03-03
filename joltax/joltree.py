@@ -778,7 +778,7 @@ class JolTree:
             
         return dists
 
-    def annotate_table(self, tax_ids: Union[int, List[int], np.ndarray], strict: bool = True) -> pl.DataFrame:
+    def annotate(self, tax_ids: Union[int, List[int], np.ndarray], strict: bool = True) -> pl.DataFrame:
         """
         Massively annotates one or more TaxIDs with scientific names and canonical ranks.
         
@@ -794,8 +794,8 @@ class JolTree:
             plus 'scientific_name' and 'rank'.
             
         Example:
-            >>> tree.annotate_table(562) # Single ID works
-            >>> tree.annotate_table([9606, 562]) # Batch works
+            >>> tree.annotate(562) # Single ID works
+            >>> tree.annotate([9606, 562]) # Batch works
         """
         if isinstance(tax_ids, (int, np.integer)):
             tax_ids = [int(tax_ids)]

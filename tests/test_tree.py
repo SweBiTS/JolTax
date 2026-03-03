@@ -88,10 +88,10 @@ class TestJolTree(unittest.TestCase):
         # LCA with root
         self.assertEqual(self.tree.get_lca(562, 1), 1)
 
-    def test_annotate_table_missing_ranks(self):
+    def test_annotate_missing_ranks(self):
         """Test mass annotation when nodes are missing certain canonical ranks."""
         # 2 (Bacteria) is a superkingdom, so it should have None for kingdom, phylum, etc.
-        df = self.tree.annotate_table([2])
+        df = self.tree.annotate([2])
         row = df.row(0, named=True)
         self.assertEqual(row['superkingdom'], 'Bacteria')
         self.assertIsNone(row['genus'])
@@ -152,9 +152,9 @@ class TestJolTree(unittest.TestCase):
         self.assertEqual(self.tree.get_name(2), 'Bacteria')
         self.assertEqual(self.tree.get_rank(2), 'superkingdom')
 
-    def test_annotate_table(self):
+    def test_annotate(self):
         tax_ids = [562, 561, 2]
-        df = self.tree.annotate_table(tax_ids)
+        df = self.tree.annotate(tax_ids)
         self.assertIsInstance(df, pl.DataFrame)
         self.assertEqual(len(df), 3)
         self.assertIn('species', df.columns)
@@ -167,8 +167,8 @@ class TestJolTree(unittest.TestCase):
         self.assertEqual(row0['scientific_name'], 'Escherichia coli')
 
     def test_annotate_single_id(self):
-        """Test that annotate_table handles a single integer correctly."""
-        df = self.tree.annotate_table(562)
+        """Test that annotate handles a single integer correctly."""
+        df = self.tree.annotate(562)
         self.assertIsInstance(df, pl.DataFrame)
         self.assertEqual(len(df), 1)
         self.assertEqual(df.row(0, named=True)['scientific_name'], 'Escherichia coli')
@@ -281,7 +281,7 @@ class TestErrorHandling(unittest.TestCase):
         with self.assertRaises(TaxIDNotFoundError):
             self.tree.get_distance_batch(ids1, ids2, strict=True)
         with self.assertRaises(TaxIDNotFoundError):
-            self.tree.annotate_table(ids1, strict=True)
+            self.tree.annotate(ids1, strict=True)
 
     def test_batch_safe_mode(self):
         """Verify that batch methods return -1 or null in safe mode."""
@@ -296,7 +296,7 @@ class TestErrorHandling(unittest.TestCase):
         self.assertEqual(dists[0], 1)
         self.assertEqual(dists[1], -1)
         
-        df = self.tree.annotate_table(ids1, strict=False)
+        df = self.tree.annotate(ids1, strict=False)
         self.assertEqual(len(df), 2)
         self.assertEqual(df.row(0, named=True)['scientific_name'], 'Escherichia coli')
         self.assertIsNone(df.row(1, named=True)['scientific_name'])

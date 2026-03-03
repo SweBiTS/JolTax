@@ -14,7 +14,7 @@ JolTax is a Python library designed to handle massive taxonomies with extreme ef
 - **Fuzzy Name Search:** Rapid fuzzy matching using RapidFuzz to find TaxIDs from names.
 - **Instant Clade Queries:** Quickly find all descendants of any node (even millions) using optimized range indexing.
 - **Hyper-Vectorized LCA search:** Lowest Common Ancestor (LCA) search and node-to-node distance calculations at lightning speeds.
-- **Mass Annotation:** Annotate massive TaxID tables with 2,000,000+ rows in under a second using Polars.
+- **Mass Annotation:** Annotate TaxID lists with millions of rows in under a second using Polars.
 
 ## Quick Start
 
