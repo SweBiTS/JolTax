@@ -17,6 +17,8 @@ This file provides the necessary context for Gemini CLI to maintain the architec
 - [x] Core `JolTree` implementation in `joltax/joltree.py`.
 - [x] Vectorized `get_lineage`, `get_clade`, `get_clade_at_rank`, `get_lca`, and `get_distance`.
 - [x] `annotate_table` for mass-annotation (benchmark: ~37s for 2.5M nodes).
+- [x] Refactored `__init__` with `tax_dir` and standardized `strict=True` error handling.
+- [ ] **BUMP VERSION TO 0.2.0:** After current Bioconda PR for 0.1.2 is merged, update version and PyPI/Bioconda release.
 - [x] Provenance metadata (build time, source files, versioning).
 - [x] Basic test suite in `tests/test_tree.py`.
 - [x] User documentation in `README.md` and `USAGE.md`.

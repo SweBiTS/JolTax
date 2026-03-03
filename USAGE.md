@@ -121,9 +121,22 @@ df = tree.annotate_table(tax_ids)
 df.write_parquet("annotated_results.parquet")
 ```
 
+### 7. Chaining Operations (Advanced Querying)
+Because `joltax` methods are designed to return standardized types (lists of integers and Polars DataFrames), you can chain operations for complex queries in a single line.
+
+```python
+# Example: Get a full taxonomic table for every genus within the Bacteria clade (TaxID: 2)
+# and immediately save it as a CSV (using Polars one-liners)
+(
+    tree.annotate_table(tree.get_clade_at_rank(2, 'genus'))
+    .write_csv("bacterial_genera.csv")
+)
+```
+This pattern is extremely efficient: it avoids Python loops and uses the library's internal vectorized lookups for the entire list at once.
+
 ---
 
-### 7. Error Handling (Strict vs. Safe Mode)
+### 8. Error Handling (Strict vs. Safe Mode)
 By default, `joltax` operates in **Strict Mode** (`strict=True`). If you request metadata or a relationship for a TaxID that does not exist in the tree, it will raise a `TaxIDNotFoundError`.
 
 To handle missing IDs gracefully (e.g., when processing old datasets with deprecated TaxIDs), you can use **Safe Mode** (`strict=False`).
