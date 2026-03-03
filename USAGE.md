@@ -42,9 +42,12 @@ logging.getLogger('joltax').setLevel(logging.INFO)
 
 # Initial build (takes ~60-90 seconds for full NCBI)
 tree = JolTree(
-    nodes_file='taxonomy/nodes.dmp', 
-    names_file='taxonomy/names.dmp'
+    nodes='taxonomy/nodes.dmp', 
+    names='taxonomy/names.dmp'
 )
+
+# OR: Build from a directory containing both nodes.dmp and names.dmp
+tree = JolTree(tax_dir='taxonomy/')
 
 # Save to a binary cache directory (uses Arrow IPC for strings)
 tree.save("ncbi_cache")
@@ -124,10 +127,11 @@ df.write_parquet("annotated_results.parquet")
 
 ### Initialization & Persistence
 
-#### `JolTree(nodes_file=None, names_file=None)`
-- **`nodes_file`**: Path to `nodes.dmp`.
-- **`names_file`**: Path to `names.dmp`.
-- *Note:* If files are provided, the tree is built immediately. If not, you must use `load()`.
+#### `JolTree(tax_dir=None, nodes=None, names=None)`
+- **`tax_dir`**: Path to a directory containing both `nodes.dmp` and `names.dmp`.
+- **`nodes`**: Path to `nodes.dmp`.
+- **`names`**: Path to `names.dmp`.
+- *Note:* If files or a directory are provided, the tree is built immediately. If not, you must use `load()`.
 
 #### `@classmethod load(directory)`
 Loads a pre-processed binary cache. Raises `RuntimeError` if the cache was built with an incompatible version of `joltax`.

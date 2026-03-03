@@ -12,13 +12,31 @@ from joltax.joltree import JolTree
 class TestJolTree(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.names_file = 'tests/data/names.dmp'
-        cls.nodes_file = 'tests/data/nodes.dmp'
+        cls.names = 'tests/data/names.dmp'
+        cls.nodes = 'tests/data/nodes.dmp'
+        cls.taxonomy_dir = 'tests/data/'
         # Check if files exist, if not, create them (should be copied already)
-        if not os.path.exists(cls.names_file):
-            raise FileNotFoundError(f"Missing test data: {cls.names_file}")
+        if not os.path.exists(cls.names):
+            raise FileNotFoundError(f"Missing test data: {cls.names}")
             
-        cls.tree = JolTree(nodes_file=cls.nodes_file, names_file=cls.names_file)
+        cls.tree = JolTree(nodes=cls.nodes, names=cls.names)
+
+    def test_directory_init(self):
+        """Test initializing JolTree by passing a directory."""
+        tree = JolTree(tax_dir=self.taxonomy_dir)
+        self.assertEqual(tree.get_lineage(562), self.tree.get_lineage(562))
+
+    def test_missing_files_error(self):
+        """Test that FileNotFoundError is raised when files are missing."""
+        # Test missing specific file
+        with self.assertRaises(FileNotFoundError):
+            JolTree(nodes='non_existent_nodes.dmp', names='non_existent_names.dmp')
+        
+        # Test missing files in directory
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with self.assertRaises(FileNotFoundError):
+                JolTree(tax_dir=tmp_dir)
 
     def test_lineage(self):
         # 562 (E. coli) -> 561 (Escherichia) -> 543 -> 91347 -> 1236 -> 1224 -> 2 -> 1

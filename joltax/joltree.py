@@ -54,16 +54,28 @@ class JolTree:
     
     This class replaces traditional object-oriented trees with contiguous 
     NumPy arrays for lightning-fast lookups, traversals, and mass annotations.
+    It leverages Polars for memory-efficient string storage and batch processing.
+    
+    Attributes:
+        parents (np.ndarray): Array where parents[i] is the internal index of the parent of node i.
+        depths (np.ndarray): Array where depths[i] is the distance from root to node i.
+        ranks (np.ndarray): Array where ranks[i] is the numeric index of the rank of node i.
+        rank_names (List[str]): List of rank names corresponding to indices in `ranks`.
+        top_rank (str): Detected top-level rank ('superkingdom' or 'domain').
+        canonical_maps (Dict[str, np.ndarray]): Maps canonical rank names to arrays of ancestor indices.
     """
 
-    def __init__(self, nodes_file: Optional[str] = None, names_file: Optional[str] = None):
+    def __init__(self, tax_dir: Optional[str] = None, nodes: Optional[str] = None, names: Optional[str] = None):
         """
-        Initialize the taxonomy tree. If files are provided, it builds from DMP files.
-        Otherwise, it can be loaded from a binary cache using `load()`.
+        Initialize the taxonomy tree. 
+        
+        If files or a directory are provided, it builds the vectorized structure 
+        from NCBI DMP files. Otherwise, it initializes an empty tree.
         
         Args:
-            nodes_file: Path to NCBI nodes.dmp
-            names_file: Path to NCBI names.dmp
+            tax_dir: Path to a directory containing both nodes.dmp and names.dmp.
+            nodes: Path to NCBI nodes.dmp.
+            names: Path to NCBI names.dmp.
         """
         # Vectorized internal index mapping (sorted array of TaxIDs)
         self._index_to_id: np.ndarray = np.array([], dtype=np.int32)
@@ -101,29 +113,55 @@ class JolTree:
         self._rank_names_series: Optional[pl.Series] = None
         self._ranks_extended: Optional[np.ndarray] = None
         
-        if nodes_file and names_file:
-            self.build_from_dmp(nodes_file, names_file)
+        # Resolve paths
+        nodes_path = nodes
+        names_path = names
+        
+        if tax_dir:
+            if not os.path.isdir(tax_dir):
+                raise NotADirectoryError(f"Taxonomy directory not found: {tax_dir}")
+            nodes_path = os.path.join(tax_dir, "nodes.dmp")
+            names_path = os.path.join(tax_dir, "names.dmp")
+            
+        if nodes_path and names_path:
+            if not os.path.exists(nodes_path):
+                raise FileNotFoundError(f"Taxonomy node file not found: {nodes_path}")
+            if not os.path.exists(names_path):
+                raise FileNotFoundError(f"Taxonomy names file not found: {names_path}")
+            self.build_from_dmp(nodes_path, names_path)
+        elif nodes_path or names_path:
+            raise ValueError("Both 'nodes' and 'names' must be provided (or 'tax_dir').")
 
-    def build_from_dmp(self, nodes_file: str, names_file: str) -> None:
+    def build_from_dmp(self, nodes: str, names: str) -> None:
         """
-        Parses NCBI DMP files and builds the vectorized internal structure.
+        Parses NCBI DMP files and builds the optimized vectorized internal structure.
+        
+        This process involves:
+        1. Parsing scientific and common names into a Polars search index.
+        2. Detecting the top rank (superkingdom vs domain).
+        3. Creating a dense internal mapping (0 to N-1) for all TaxIDs.
+        4. Calculating node depths and Euler Tour timestamps for instant clade queries.
+        5. Pre-calculating ancestors for all canonical ranks.
         
         Args:
-            nodes_file: Path to NCBI nodes.dmp
-            names_file: Path to NCBI names.dmp
+            nodes: Path to NCBI nodes.dmp.
+            names: Path to NCBI names.dmp.
+            
+        Raises:
+            ValueError: If both 'superkingdom' and 'domain' ranks are found.
         """
-        self._source_nodes = os.path.abspath(nodes_file)
-        self._source_names = os.path.abspath(names_file)
+        self._source_nodes = os.path.abspath(nodes)
+        self._source_names = os.path.abspath(names)
         self._build_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         logger.info(f"Starting taxonomy build at {self._build_time}...")
         
         # 1. Parse Names
-        logger.info(f"Parsing names from {names_file}...")
+        logger.info(f"Parsing names from {names}...")
         scientific_names = {}
         common_names = {}
         search_data = [] # List of (name, tax_id)
         
-        with open(names_file, 'r') as f:
+        with open(names, 'r') as f:
             for name_line in f:
                 parts = name_line.split('|')
                 name_type = parts[3].strip()
@@ -146,12 +184,12 @@ class JolTree:
         self._search_index = pl.DataFrame(search_data).sort("name")
         
         # 2. Parse Nodes and initial parent structure
-        logger.info(f"Parsing nodes from {nodes_file}...")
+        logger.info(f"Parsing nodes from {nodes}...")
         temp_parents = {}
         temp_ranks = {}
         all_ranks = set()
         
-        with open(nodes_file, 'r') as f:
+        with open(nodes, 'r') as f:
             for line in f:
                 parts = line.split('|')
                 tax_id = int(parts[0].strip())
@@ -302,14 +340,30 @@ class JolTree:
                 self.exit_times[idx] = timer - 1
 
     def _get_index(self, tax_id: int) -> int:
-        """Returns the internal index for a TaxID, or -1 if not found."""
+        """
+        Returns the dense internal index for a given NCBI TaxID.
+        
+        Args:
+            tax_id: The NCBI TaxID to look up.
+            
+        Returns:
+            The 0-based internal index, or -1 if the TaxID is not in the tree.
+        """
         idx = np.searchsorted(self._index_to_id, tax_id)
         if idx < len(self._index_to_id) and self._index_to_id[idx] == tax_id:
             return int(idx)
         return -1
     
     def _get_indices(self, tax_ids: np.ndarray) -> np.ndarray:
-        """Returns internal indices for an array of TaxIDs, with -1 for missing."""
+        """
+        Vectorized lookup of internal indices for an array of NCBI TaxIDs.
+        
+        Args:
+            tax_ids: A NumPy array of NCBI TaxIDs.
+            
+        Returns:
+            A NumPy array of internal indices, with -1 for missing TaxIDs.
+        """
         indices = np.searchsorted(self._index_to_id, tax_ids)
         # Handle out of bounds
         mask = indices < len(self._index_to_id)
@@ -319,7 +373,20 @@ class JolTree:
         return np.where(valid, indices, -1)
 
     def get_lineage(self, tax_id: int) -> List[int]:
-        """Returns the full lineage from root to the given TaxID."""
+        """
+        Returns the full path of TaxIDs from the root to the given TaxID.
+        
+        Args:
+            tax_id: The NCBI TaxID to trace.
+            
+        Returns:
+            A list of TaxIDs starting from root (1) down to the query ID.
+            Returns an empty list if the TaxID is not found.
+            
+        Example:
+            >>> tree.get_lineage(562) # E. coli
+            [1, 2, 1224, 1236, 91347, 543, 561, 562]
+        """
         idx = self._get_index(tax_id)
         if idx == -1:
             logger.warning(f"TaxID {tax_id} not found in taxonomy tree.")
@@ -337,21 +404,45 @@ class JolTree:
         return lineage[::-1]
 
     def get_name(self, tax_id: int) -> str:
-        """Returns the scientific name of the given TaxID."""
+        """
+        Returns the scientific name for a given NCBI TaxID.
+        
+        Args:
+            tax_id: The NCBI TaxID.
+            
+        Returns:
+            The scientific name string, or "Unknown_<tax_id>" if not found.
+        """
         idx = self._get_index(tax_id)
         if idx != -1:
             return self._scientific_names[idx]
         return f"Unknown_{tax_id}"
 
     def get_common_name(self, tax_id: int) -> Optional[str]:
-        """Returns the genbank common name of the given TaxID, if available."""
+        """
+        Returns the GenBank common name for a given NCBI TaxID, if available.
+        
+        Args:
+            tax_id: The NCBI TaxID.
+            
+        Returns:
+            The common name string, or None if not available.
+        """
         idx = self._get_index(tax_id)
         if idx != -1:
             return self._common_names[idx]
         return None
 
     def get_rank(self, tax_id: int) -> str:
-        """Returns the taxonomic rank of the given TaxID."""
+        """
+        Returns the taxonomic rank for a given NCBI TaxID.
+        
+        Args:
+            tax_id: The NCBI TaxID.
+            
+        Returns:
+            The rank name (e.g., 'species', 'genus'), or 'unknown' if not found.
+        """
         idx = self._get_index(tax_id)
         if idx == -1:
             logger.warning(f"TaxID {tax_id} not found in taxonomy tree.")
@@ -360,7 +451,25 @@ class JolTree:
 
     def search_name(self, query: str, fuzzy: bool = False, limit: int = 10, score_cutoff: float = 60.0) -> pl.DataFrame:
         """
-        Searches for TaxIDs by name.
+        Searches for TaxIDs by name using exact or fuzzy matching.
+        
+        Args:
+            query: The name string to search for.
+            fuzzy: If True, uses RapidFuzz for approximate matching.
+            limit: Maximum number of candidates to return (fuzzy only).
+            score_cutoff: Minimum similarity score (0-100) for fuzzy matches.
+            
+        Returns:
+            A Polars DataFrame with columns: ['tax_id', 'matched_name', 'scientific_name', 'rank', 'score'].
+            
+        Example:
+            >>> tree.search_name("Escherchia", fuzzy=True, limit=1)
+            shape: (1, 5)
+            ┌────────┬──────────────┬──────────────────┬────────┬───────┐
+            │ tax_id ┆ matched_name ┆ scientific_name  ┆ rank   ┆ score │
+            ╞════════╪══════════════╪══════════════════╪════════╪═══════╡
+            │ 561    ┆ Escherichia  ┆ Escherichia      ┆ genus  ┆ 92.0  │
+            └────────┴──────────────┴──────────────────┴────────┴───────┘
         """
         if not fuzzy:
             matches = self._search_index.filter(pl.col("name") == query)
@@ -417,7 +526,17 @@ class JolTree:
         return pl.DataFrame(data).sort("score", descending=True)
 
     def get_clade(self, tax_id: int) -> List[int]:
-        """Returns all TaxIDs in the clade rooted at the given TaxID."""
+        """
+        Returns all TaxIDs in the clade (descendants) rooted at the given TaxID.
+        
+        Uses Euler Tour range indexing for O(1) identification of descendants.
+        
+        Args:
+            tax_id: The root NCBI TaxID of the clade.
+            
+        Returns:
+            A list of NCBI TaxIDs belonging to the clade.
+        """
         idx = self._get_index(tax_id)
         if idx == -1:
             logger.warning(f"TaxID {tax_id} not found in taxonomy tree.")
@@ -431,7 +550,18 @@ class JolTree:
 
     def get_clade_at_rank(self, tax_id: int, rank_name: str) -> List[int]:
         """
-        Returns all TaxIDs of a specific rank within the clade rooted at tax_id.
+        Returns all descendants of a specific rank within the clade rooted at tax_id.
+        
+        Args:
+            tax_id: The root NCBI TaxID of the clade.
+            rank_name: The target rank name (e.g., 'species').
+            
+        Returns:
+            A list of NCBI TaxIDs of the target rank within the clade.
+            
+        Example:
+            >>> tree.get_clade_at_rank(2, 'phylum') # All phyla in Bacteria
+            [1224, 201174, ...]
         """
         idx = self._get_index(tax_id)
         if idx == -1:
@@ -451,7 +581,18 @@ class JolTree:
         return self._index_to_id[mask].astype(int).tolist()
 
     def get_lca(self, tax_id_1: int, tax_id_2: int) -> int:
-        """Finds the Lowest Common Ancestor using Binary Lifting."""
+        """
+        Finds the Lowest Common Ancestor (LCA) of two NCBI TaxIDs.
+        
+        Uses Hyper-Vectorized binary lifting for O(log Depth) performance.
+        
+        Args:
+            tax_id_1: First NCBI TaxID.
+            tax_id_2: Second NCBI TaxID.
+            
+        Returns:
+            The NCBI TaxID of the LCA. Returns 1 (Root) if one or both IDs are missing.
+        """
         idx1 = self._get_index(tax_id_1)
         idx2 = self._get_index(tax_id_2)
         
@@ -484,17 +625,37 @@ class JolTree:
         return int(self._index_to_id[self.parents[idx1]])
 
     def get_distance(self, tax_id_1: int, tax_id_2: int) -> int:
-        """Calculates distance (number of edges) between two TaxIDs."""
+        """
+        Calculates the distance (number of edges) between two NCBI TaxIDs.
+        
+        Args:
+            tax_id_1: First NCBI TaxID.
+            tax_id_2: Second NCBI TaxID.
+            
+        Returns:
+            The number of edges between the nodes. Returns 0 if nodes are missing.
+        """
         lca_id = self.get_lca(tax_id_1, tax_id_2)
         idx1 = self._get_index(tax_id_1)
         idx2 = self._get_index(tax_id_2)
         idx_lca = self._get_index(lca_id)
+        if idx1 == -1 or idx2 == -1:
+            return 0
         return int(self.depths[idx1] + self.depths[idx2] - 2 * self.depths[idx_lca])
 
     def get_lca_batch(self, ids1: Union[List[int], np.ndarray], ids2: Union[List[int], np.ndarray]) -> np.ndarray:
         """
-        Calculates Lowest Common Ancestor for arrays of TaxIDs.
-        Hyper-vectorized implementation for peak performance.
+        Calculates Lowest Common Ancestor for arrays of NCBI TaxIDs.
+        
+        Hyper-vectorized implementation using transposed binary lifting.
+        Capable of resolving millions of pairs per second.
+        
+        Args:
+            ids1: First array of NCBI TaxIDs.
+            ids2: Second array of NCBI TaxIDs.
+            
+        Returns:
+            A NumPy array of LCA TaxIDs.
         """
         ids1 = np.array(ids1, dtype=np.int32)
         ids2 = np.array(ids2, dtype=np.int32)
@@ -551,7 +712,16 @@ class JolTree:
         return results
 
     def get_distance_batch(self, ids1: Union[List[int], np.ndarray], ids2: Union[List[int], np.ndarray]) -> np.ndarray:
-        """Vectorized distance calculation for arrays of TaxIDs."""
+        """
+        Vectorized distance calculation for arrays of NCBI TaxIDs.
+        
+        Args:
+            ids1: First array of NCBI TaxIDs.
+            ids2: Second array of NCBI TaxIDs.
+            
+        Returns:
+            A NumPy array of edge distances.
+        """
         ids1 = np.array(ids1, dtype=np.int32)
         ids2 = np.array(ids2, dtype=np.int32)
         
@@ -573,8 +743,27 @@ class JolTree:
 
     def annotate_table(self, tax_ids: Union[List[int], np.ndarray]) -> pl.DataFrame:
         """
-        Massively annotates a list of TaxIDs with scientific_names and canonical ranks.
-        Extremely efficient for large tables (e.g. 200k+ rows) using Polars and vectorized lookups.
+        Massively annotates a list of TaxIDs with scientific names and canonical ranks.
+        
+        Extremely efficient for large tables (e.g., millions of rows) using 
+        Polars vectorized 'gather' and pre-calculated canonical rank maps.
+        
+        Args:
+            tax_ids: A list or NumPy array of NCBI TaxIDs to annotate.
+            
+        Returns:
+            A Polars DataFrame containing columns for each canonical rank,
+            plus 'scientific_name' and 'rank'.
+            
+        Example:
+            >>> tree.annotate_table([9606, 562])
+            shape: (2, 11)
+            ┌────────┬─────────────┬─────────┬──────────┬───────────┬────────────┬─────────┬───────────────┬──────────────────┬─────────┐
+            │ tax_id ┆ domain      ┆ kingdom ┆ phylum   ┆ class     ┆ order      ┆ family  ┆ genus         ┆ scientific_name  ┆ rank    │
+            ╞════════╪═════════════╪═════════╪══════════╪═══════════╪════════════╪═════════╪═══════════════╪══════════════════╪═════════╡
+            │ 9606   ┆ Eukaryota   ┆ Metazoa ┆ Chordata ┆ Mammalia  ┆ Primates   ┆ Hominidae┆ Homo          ┆ Homo sapiens     ┆ species │
+            │ 562    ┆ Bacteria    ┆ None    ┆ Pseudom… ┆ Gammapro… ┆ Enterobac… ┆ Entero… ┆ Escherichia   ┆ Escherichia coli ┆ species │
+            └────────┴─────────────┴─────────┴──────────┴───────────┴────────────┴─────────┴───────────────┴──────────────────┴─────────┘
         """
         logger.info(f"Annotating {len(tax_ids)} taxa...")
         canonical_columns = [self.top_rank] + [r for r in CANONICAL_RANKS if r not in ['superkingdom', 'domain']]
@@ -617,7 +806,12 @@ class JolTree:
         return df.select(final_order)
 
     def _ensure_up_table(self) -> None:
-        """Lazy initialization of binary lifting table."""
+        """
+        Lazy initialization of the binary lifting table.
+        
+        Constructs a hyper-vectorized table of shape (max_log, num_nodes) 
+        where up_table[j, i] is the 2^j-th ancestor of node i.
+        """
         if self._up_table is not None:
             return
             
@@ -638,7 +832,15 @@ class JolTree:
             self._up_table[j, :] = self._up_table[j-1, prev_ancestors]
 
     def save(self, directory: str) -> None:
-        """Saves the vectorized tree to a directory for fast loading."""
+        """
+        Saves the vectorized tree and metadata to a directory for fast loading.
+        
+        Uses NumPy .npy format for numerical arrays and Apache Arrow IPC for 
+        Polars string stores, ensuring nearly instantaneous zero-copy loading.
+        
+        Args:
+            directory: Path to the cache directory.
+        """
         if not os.path.exists(directory):
             os.makedirs(directory)
             
@@ -678,7 +880,21 @@ class JolTree:
 
     @classmethod
     def load(cls, directory: str) -> 'JolTree':
-        """Loads the vectorized tree from a binary cache directory."""
+        """
+        Loads a vectorized tree from a binary cache directory.
+        
+        Validates the cache version to ensure compatibility with the current 
+        package version.
+        
+        Args:
+            directory: Path to the binary cache directory.
+            
+        Returns:
+            An initialized JolTree object.
+            
+        Raises:
+            RuntimeError: If the cache version is incompatible.
+        """
         logger.info(f"Loading binary cache from {directory}...")
         
         import pickle

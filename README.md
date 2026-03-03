@@ -22,7 +22,8 @@ JolTax is a Python library designed to handle massive taxonomies with extreme ef
 from joltax import JolTree
 
 # Build and process the NCBI taxonomy
-tree = JolTree(nodes_file='nodes.dmp', names_file='names.dmp')
+tree = JolTree(nodes='nodes.dmp', names='names.dmp')
+# OR: tree = JolTree(tax_dir='/path/to/ncbi/taxonomy/')
 
 # Save for instant loading next time
 tree.save('my_taxonomy_cache')
