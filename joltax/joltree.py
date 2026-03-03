@@ -841,9 +841,11 @@ class JolTree:
             raise TypeError(f"tax_ids must be an integer, list, or numpy array, got {type(tax_ids).__name__}")
             
         if isinstance(tax_ids, (int, np.integer)):
-            tax_ids = [int(tax_ids)]
+            current_ids = [int(tax_ids)]
+        else:
+            current_ids = tax_ids
             
-        ids_arr = np.array(tax_ids, dtype=np.int32)
+        ids_arr = np.array(current_ids, dtype=np.int32)
         indices = self._get_indices(ids_arr)
         
         if strict:
@@ -851,7 +853,7 @@ class JolTree:
             if len(missing) > 0:
                 raise TaxIDNotFoundError(f"TaxID {missing[0]} (and possibly others) not found in taxonomy tree.")
 
-        logger.info(f"Annotating {len(tax_ids)} taxa...")
+        logger.info(f"Annotating {len(ids_arr)} taxa...")
         canonical_columns = [self.top_rank] + [r for r in CANONICAL_RANKS if r not in ['superkingdom', 'domain']]
         
         valid_mask = indices != -1
