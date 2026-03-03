@@ -4,11 +4,11 @@ joltax/joltree.py
 Implementation of a high-performance, vectorized taxonomy tree.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # The minimum version of a saved taxonomy cache that is compatible with this software.
 # Increment this when making breaking changes to the binary layout or metadata structure.
-MINIMUM_CACHE_VERSION = "0.1.0"
+MINIMUM_CACHE_VERSION = "0.1.1"
 
 import logging
 import os
@@ -65,8 +65,7 @@ class JolTree:
             nodes_file: Path to NCBI nodes.dmp
             names_file: Path to NCBI names.dmp
         """
-        # Internal mapping from original TaxID to dense 0-based index
-        self._id_to_index: Dict[int, int] = {}
+        # Vectorized internal index mapping (sorted array of TaxIDs)
         self._index_to_id: np.ndarray = np.array([], dtype=np.int32)
         
         # Primary arrays (indexed by the dense internal index)
@@ -74,9 +73,9 @@ class JolTree:
         self.depths: np.ndarray = np.array([], dtype=np.int32)
         self.ranks: np.ndarray = np.array([], dtype=np.uint8)
         
-        # Metadata storage
-        self.names: Dict[int, str] = {}
-        self.common_names: Dict[int, str] = {}
+        # Metadata storage (Polars Series for memory efficiency)
+        self._scientific_names: pl.Series = pl.Series("scientific_name", [], dtype=pl.String)
+        self._common_names: pl.Series = pl.Series("common_name", [], dtype=pl.String)
         self.rank_names: List[str] = []
         self.top_rank: str = "domain"  # Default, will be detected
         self._source_nodes: Optional[str] = None
@@ -90,13 +89,17 @@ class JolTree:
         # Binary lifting table for LCA (initialized on demand)
         self._up_table: Optional[np.ndarray] = None
         
-        # Pre-calculated canonical rank maps (dense internal index -> TaxID)
-        # Dictionary mapping rank name to np.ndarray of shape (num_nodes,)
+        # Pre-calculated canonical rank maps (dense internal index -> dense internal index)
+        # Values are internal indices, not TaxIDs. -1 means no ancestor at that rank.
         self.canonical_maps: Dict[str, np.ndarray] = {}
         
-        # Name index for searching
-        self._name_to_ids: Dict[str, List[int]] = {}
-        self._all_names_cached: Optional[List[str]] = None
+        # Search index (Polars DataFrame: name -> tax_id)
+        self._search_index: pl.DataFrame = pl.DataFrame(schema={"name": pl.String, "tax_id": pl.Int32})
+        
+        # Caches for vectorized lookup (prepared during build/load)
+        self._sci_names_lookup: Optional[pl.Series] = None
+        self._rank_names_series: Optional[pl.Series] = None
+        self._ranks_extended: Optional[np.ndarray] = None
         
         if nodes_file and names_file:
             self.build_from_dmp(nodes_file, names_file)
@@ -118,7 +121,7 @@ class JolTree:
         logger.info(f"Parsing names from {names_file}...")
         scientific_names = {}
         common_names = {}
-        name_to_ids = {}
+        search_data = [] # List of (name, tax_id)
         
         with open(names_file, 'r') as f:
             for name_line in f:
@@ -137,15 +140,10 @@ class JolTree:
                 elif name_type == 'genbank common name':
                     common_names[tax_id] = name_txt
                 
-                # Populate search index
-                if name_txt not in name_to_ids:
-                    name_to_ids[name_txt] = []
-                name_to_ids[name_txt].append(tax_id)
+                search_data.append({"name": name_txt, "tax_id": tax_id})
         
-        self.names = scientific_names
-        self.common_names = common_names
-        self._name_to_ids = name_to_ids
-        self._all_names_cached = list(name_to_ids.keys())
+        # Build search index
+        self._search_index = pl.DataFrame(search_data).sort("name")
         
         # 2. Parse Nodes and initial parent structure
         logger.info(f"Parsing nodes from {nodes_file}...")
@@ -176,25 +174,34 @@ class JolTree:
         logger.info("Creating dense mapping and vectorized arrays...")
         sorted_tax_ids = sorted(temp_parents.keys())
         num_nodes = len(sorted_tax_ids)
-        self._id_to_index = {tid: i for i, tid in enumerate(sorted_tax_ids)}
         self._index_to_id = np.array(sorted_tax_ids, dtype=np.int32)
         
-        # Rank indexing
+        # Mapping rank names to indices
         self.rank_names = sorted(list(all_ranks))
         rank_to_idx = {r: i for i, r in enumerate(self.rank_names)}
         
         self.parents = np.zeros(num_nodes, dtype=np.int32)
         self.ranks = np.zeros(num_nodes, dtype=np.uint8)
         
-        for tid, i in self._id_to_index.items():
+        # Temporary dict for building parent connections (will be discarded)
+        id_to_index_temp = {tid: i for i, tid in enumerate(sorted_tax_ids)}
+        
+        for tid, i in id_to_index_temp.items():
             parent_id = temp_parents[tid]
             # Handle root (1) which is its own parent in NCBI
             if tid == 1:
                 self.parents[i] = i
             else:
-                self.parents[i] = self._id_to_index[parent_id]
+                self.parents[i] = id_to_index_temp[parent_id]
             
             self.ranks[i] = rank_to_idx[temp_ranks[tid]]
+
+        # Populate names aligned with indices
+        logger.info("Aligning names and ranks...")
+        sci_names_list = [scientific_names.get(tid, f"Unknown_{tid}") for tid in sorted_tax_ids]
+        com_names_list = [common_names.get(tid) for tid in sorted_tax_ids]
+        self._scientific_names = pl.Series("scientific_name", sci_names_list)
+        self._common_names = pl.Series("common_name", com_names_list)
 
         # 4. Calculate depths
         logger.info("Calculating node depths...")
@@ -208,7 +215,22 @@ class JolTree:
         # 6. Pre-calculate canonical rank maps
         self._build_canonical_maps()
         
+        # 7. Prepare caches for vectorized lookups
+        self._prepare_vectorized_caches()
+        
         logger.info("Taxonomy build complete.")
+
+    def _prepare_vectorized_caches(self) -> None:
+        """Initializes caches used for high-performance vectorized lookups."""
+        logger.info("Preparing vectorized lookup caches...")
+        # Scientific names lookup (aligned with dense internal index + 1 for "Unknown")
+        self._sci_names_lookup = self._scientific_names.append(pl.Series([None]))
+        
+        # Rank names lookup
+        self._rank_names_series = pl.Series(self.rank_names).append(pl.Series(["unclassified"]))
+        
+        # Ranks extended with a pointer to "unclassified" for unknown nodes
+        self._ranks_extended = np.append(self.ranks, [len(self.rank_names)]).astype(np.int32)
 
     def _build_canonical_maps(self) -> None:
         """Pre-calculates canonical rank ancestors for all nodes."""
@@ -224,7 +246,7 @@ class JolTree:
         # Sort nodes by depth to ensure parents are processed before children
         for i in range(num_nodes):
             curr_idx = i
-            root_idx = self._id_to_index[1]
+            root_idx = 0 # TaxID 1 is always the first in sorted_tax_ids
             while True:
                 rank_name = self.rank_names[self.ranks[curr_idx]]
                 
@@ -234,7 +256,7 @@ class JolTree:
                     mapped_rank = self.top_rank
                 
                 if mapped_rank in self.canonical_maps:
-                    self.canonical_maps[mapped_rank][i] = self._index_to_id[curr_idx]
+                    self.canonical_maps[mapped_rank][i] = curr_idx
                 
                 if curr_idx == root_idx:
                     break
@@ -242,7 +264,7 @@ class JolTree:
 
     def _calculate_depth(self, index: int) -> int:
         """Recursive depth calculation with memoization."""
-        if index == self._id_to_index[1]:
+        if index == 0: # TaxID 1 is always index 0
             return 0
         if self.depths[index] != 0:
             return self.depths[index]
@@ -260,7 +282,7 @@ class JolTree:
         
         # Build adjacency list (children)
         children = [[] for _ in range(num_nodes)]
-        root_idx = self._id_to_index[1]
+        root_idx = 0 # TaxID 1
         for i, p in enumerate(self.parents):
             if i != root_idx:
                 children[p].append(i)
@@ -279,15 +301,32 @@ class JolTree:
             else:
                 self.exit_times[idx] = timer - 1
 
+    def _get_index(self, tax_id: int) -> int:
+        """Returns the internal index for a TaxID, or -1 if not found."""
+        idx = np.searchsorted(self._index_to_id, tax_id)
+        if idx < len(self._index_to_id) and self._index_to_id[idx] == tax_id:
+            return int(idx)
+        return -1
+    
+    def _get_indices(self, tax_ids: np.ndarray) -> np.ndarray:
+        """Returns internal indices for an array of TaxIDs, with -1 for missing."""
+        indices = np.searchsorted(self._index_to_id, tax_ids)
+        # Handle out of bounds
+        mask = indices < len(self._index_to_id)
+        # Check for actual equality
+        valid = np.zeros(len(tax_ids), dtype=bool)
+        valid[mask] = self._index_to_id[indices[mask]] == tax_ids[mask]
+        return np.where(valid, indices, -1)
+
     def get_lineage(self, tax_id: int) -> List[int]:
         """Returns the full lineage from root to the given TaxID."""
-        if tax_id not in self._id_to_index:
+        idx = self._get_index(tax_id)
+        if idx == -1:
             logger.warning(f"TaxID {tax_id} not found in taxonomy tree.")
             return []
         
-        idx = self._id_to_index[tax_id]
         lineage = []
-        root_idx = self._id_to_index[1]
+        root_idx = 0
         
         while True:
             lineage.append(int(self._index_to_id[idx]))
@@ -299,54 +338,52 @@ class JolTree:
 
     def get_name(self, tax_id: int) -> str:
         """Returns the scientific name of the given TaxID."""
-        return self.names.get(tax_id, f"Unknown_{tax_id}")
+        idx = self._get_index(tax_id)
+        if idx != -1:
+            return self._scientific_names[idx]
+        return f"Unknown_{tax_id}"
 
     def get_common_name(self, tax_id: int) -> Optional[str]:
         """Returns the genbank common name of the given TaxID, if available."""
-        return self.common_names.get(tax_id)
+        idx = self._get_index(tax_id)
+        if idx != -1:
+            return self._common_names[idx]
+        return None
 
     def get_rank(self, tax_id: int) -> str:
         """Returns the taxonomic rank of the given TaxID."""
-        if tax_id not in self._id_to_index:
+        idx = self._get_index(tax_id)
+        if idx == -1:
             logger.warning(f"TaxID {tax_id} not found in taxonomy tree.")
             return "unknown"
-        idx = self._id_to_index[tax_id]
         return self.rank_names[self.ranks[idx]]
 
     def search_name(self, query: str, fuzzy: bool = False, limit: int = 10, score_cutoff: float = 60.0) -> pl.DataFrame:
         """
         Searches for TaxIDs by name.
-        
-        Args:
-            query: The name to search for.
-            fuzzy: If True, performs fuzzy matching using RapidFuzz.
-            limit: Maximum number of fuzzy results to return.
-            score_cutoff: Minimum similarity score (0-100) for fuzzy matches.
-            
-        Returns:
-            A Polars DataFrame containing matching TaxIDs and metadata.
         """
         if not fuzzy:
-            tids = self._name_to_ids.get(query, [])
-            results = []
-            for tid in tids:
-                idx = self._id_to_index[tid]
-                results.append({
-                    "tax_id": tid,
-                    "name": query,
-                    "rank": self.rank_names[self.ranks[idx]],
-                    "score": 100.0
-                })
-            return pl.DataFrame(results) if results else pl.DataFrame(schema=["tax_id", "name", "rank", "score"])
+            matches = self._search_index.filter(pl.col("name") == query)
+            if matches.is_empty():
+                return pl.DataFrame(schema=["tax_id", "name", "rank", "score"])
+            
+            # Vectorized rank lookup for matches
+            tids = matches["tax_id"].to_numpy()
+            indices = self._get_indices(tids)
+            ranks = [self.rank_names[self.ranks[i]] if i != -1 else "unknown" for i in indices]
+            
+            return matches.with_columns([
+                pl.Series("rank", ranks),
+                pl.lit(100.0).alias("score")
+            ])
 
         # Fuzzy matching path
-        if not self._all_names_cached:
-            self._all_names_cached = list(self._name_to_ids.keys())
+        unique_names = self._search_index["name"].unique().to_list()
             
         # rapidfuzz extract
         matches = process.extract(
             query, 
-            self._all_names_cached, 
+            unique_names, 
             scorer=fuzz.WRatio, 
             limit=limit, 
             processor=utils.default_process,
@@ -355,10 +392,11 @@ class JolTree:
         
         data = []
         for match_str, score, _ in matches:
-            tids = self._name_to_ids[match_str]
+            # Find all TaxIDs associated with this name
+            tids = self._search_index.filter(pl.col("name") == match_str)["tax_id"].to_list()
             for tid in tids:
-                idx = self._id_to_index[tid]
-                rank = self.rank_names[self.ranks[idx]]
+                idx = self._get_index(tid)
+                rank = self.rank_names[self.ranks[idx]] if idx != -1 else "unknown"
                 
                 # Smart Ranking: Boost scores for canonical ranks
                 rank_boost = 0.0
@@ -380,11 +418,11 @@ class JolTree:
 
     def get_clade(self, tax_id: int) -> List[int]:
         """Returns all TaxIDs in the clade rooted at the given TaxID."""
-        if tax_id not in self._id_to_index:
+        idx = self._get_index(tax_id)
+        if idx == -1:
             logger.warning(f"TaxID {tax_id} not found in taxonomy tree.")
             return []
         
-        idx = self._id_to_index[tax_id]
         entry = self.entry_times[idx]
         exit = self.exit_times[idx]
         
@@ -394,9 +432,9 @@ class JolTree:
     def get_clade_at_rank(self, tax_id: int, rank_name: str) -> List[int]:
         """
         Returns all TaxIDs of a specific rank within the clade rooted at tax_id.
-        Efficiently filters thousands of nodes using vectorized operations.
         """
-        if tax_id not in self._id_to_index:
+        idx = self._get_index(tax_id)
+        if idx == -1:
             logger.warning(f"TaxID {tax_id} not found in taxonomy tree.")
             return []
         
@@ -406,7 +444,6 @@ class JolTree:
             logger.warning(f"Rank '{rank_name}' not found in taxonomy. Available ranks: {self.rank_names}")
             return []
         
-        idx = self._id_to_index[tax_id]
         entry = self.entry_times[idx]
         exit = self.exit_times[idx]
         
@@ -415,16 +452,14 @@ class JolTree:
 
     def get_lca(self, tax_id_1: int, tax_id_2: int) -> int:
         """Finds the Lowest Common Ancestor using Binary Lifting."""
-        if tax_id_1 not in self._id_to_index:
-            logger.warning(f"TaxID {tax_id_1} not found in taxonomy tree.")
-            return 1
-        if tax_id_2 not in self._id_to_index:
-            logger.warning(f"TaxID {tax_id_2} not found in taxonomy tree.")
+        idx1 = self._get_index(tax_id_1)
+        idx2 = self._get_index(tax_id_2)
+        
+        if idx1 == -1 or idx2 == -1:
+            logger.warning(f"One or both TaxIDs ({tax_id_1}, {tax_id_2}) not found.")
             return 1
             
         self._ensure_up_table()
-        idx1 = self._id_to_index[tax_id_1]
-        idx2 = self._id_to_index[tax_id_2]
         
         if self.depths[idx1] < self.depths[idx2]:
             idx1, idx2 = idx2, idx1
@@ -447,9 +482,9 @@ class JolTree:
     def get_distance(self, tax_id_1: int, tax_id_2: int) -> int:
         """Calculates distance (number of edges) between two TaxIDs."""
         lca_id = self.get_lca(tax_id_1, tax_id_2)
-        idx1 = self._id_to_index[tax_id_1]
-        idx2 = self._id_to_index[tax_id_2]
-        idx_lca = self._id_to_index[lca_id]
+        idx1 = self._get_index(tax_id_1)
+        idx2 = self._get_index(tax_id_2)
+        idx_lca = self._get_index(lca_id)
         return int(self.depths[idx1] + self.depths[idx2] - 2 * self.depths[idx_lca])
 
     def annotate_table(self, tax_ids: Union[List[int], np.ndarray]) -> pl.DataFrame:
@@ -459,18 +494,40 @@ class JolTree:
         """
         logger.info(f"Annotating {len(tax_ids)} taxa...")
         canonical_columns = [self.top_rank] + [r for r in CANONICAL_RANKS if r not in ['superkingdom', 'domain']]
+        
         tax_ids_arr = np.array(tax_ids, dtype=np.int32)
-        indices = np.array([self._id_to_index.get(tid, -1) for tid in tax_ids_arr], dtype=np.int32)
+        indices = self._get_indices(tax_ids_arr)
         valid_mask = indices != -1
+        
+        # dummy_idx points to the "Unknown/None" entry at the end of the lookup series
+        dummy_idx = len(self._index_to_id)
+        safe_indices = np.where(valid_mask, indices, dummy_idx)
+        
+        # Ensure caches are ready
+        if self._sci_names_lookup is None:
+            self._prepare_vectorized_caches()
+            
         df_dict = {"tax_id": tax_ids_arr}
         
         for rank in canonical_columns:
-            ancestor_ids = np.full(len(tax_ids_arr), -1, dtype=np.int32)
-            ancestor_ids[valid_mask] = self.canonical_maps[rank][indices[valid_mask]]
-            df_dict[rank] = [self.names.get(int(tid)) if tid != -1 else None for tid in ancestor_ids]
+            # canonical_maps now store internal indices
+            ancestor_indices = np.full(len(tax_ids_arr), -1, dtype=np.int32)
+            # Map input tax_ids to their ancestor's internal index
+            ancestor_indices[valid_mask] = self.canonical_maps[rank][indices[valid_mask]]
+            
+            # Use dummy_idx for missing ancestors
+            safe_anc_indices = np.where(ancestor_indices != -1, ancestor_indices, dummy_idx)
+            
+            # Vectorized gather from Polars
+            df_dict[rank] = self._sci_names_lookup.gather(safe_anc_indices.astype(np.int32))
 
-        df_dict["scientific_name"] = [self.names.get(int(tid), "Unknown") if tid != -1 else "Unknown" for tid in tax_ids_arr]
-        df_dict["rank"] = [self.rank_names[self.ranks[idx]] if idx != -1 else "unclassified" for idx in indices]
+        # Scientific name for the input TaxID
+        df_dict["scientific_name"] = self._sci_names_lookup.gather(safe_indices.astype(np.int32))
+        
+        # Rank for the input TaxID
+        target_rank_indices = self._ranks_extended[safe_indices]
+        df_dict["rank"] = self._rank_names_series.gather(target_rank_indices.astype(np.int32))
+        
         df = pl.DataFrame(df_dict)
         final_order = ['tax_id'] + canonical_columns + ['scientific_name', 'rank']
         return df.select(final_order)
@@ -503,6 +560,11 @@ class JolTree:
         np.save(os.path.join(directory, "entry_times.npy"), self.entry_times)
         np.save(os.path.join(directory, "exit_times.npy"), self.exit_times)
         
+        # Save Polars metadata
+        self._scientific_names.to_frame().write_ipc(os.path.join(directory, "scientific_names.ipc"))
+        self._common_names.to_frame().write_ipc(os.path.join(directory, "common_names.ipc"))
+        self._search_index.write_ipc(os.path.join(directory, "search_index.ipc"))
+
         maps_dir = os.path.join(directory, "canonical_maps")
         if not os.path.exists(maps_dir):
             os.makedirs(maps_dir)
@@ -512,11 +574,7 @@ class JolTree:
         import pickle
         with open(os.path.join(directory, "metadata.pkl"), 'wb') as f:
             pickle.dump({
-                "names": self.names,
-                "common_names": self.common_names,
-                "name_to_ids": self._name_to_ids,
                 "rank_names": self.rank_names,
-                "id_to_index": self._id_to_index,
                 "top_rank": self.top_rank,
                 "provenance": {
                     "build_time": self._build_time,
@@ -550,12 +608,7 @@ class JolTree:
                 )
 
             tree = cls()
-            tree.names = meta["names"]
-            tree.common_names = meta.get("common_names", {})
-            tree._name_to_ids = meta.get("name_to_ids", {})
-            tree._all_names_cached = list(tree._name_to_ids.keys()) if tree._name_to_ids else None
             tree.rank_names = meta["rank_names"]
-            tree._id_to_index = meta["id_to_index"]
             tree.top_rank = meta.get("top_rank", "domain")
             tree._build_time = prov.get("build_time")
             tree._source_nodes = prov.get("source_nodes")
@@ -568,12 +621,20 @@ class JolTree:
         tree.entry_times = np.load(os.path.join(directory, "entry_times.npy"))
         tree.exit_times = np.load(os.path.join(directory, "exit_times.npy"))
         
+        # Load Polars metadata
+        tree._scientific_names = pl.read_ipc(os.path.join(directory, "scientific_names.ipc"))["scientific_name"]
+        tree._common_names = pl.read_ipc(os.path.join(directory, "common_names.ipc"))["common_name"]
+        tree._search_index = pl.read_ipc(os.path.join(directory, "search_index.ipc"))
+
         maps_dir = os.path.join(directory, "canonical_maps")
         if os.path.exists(maps_dir):
             for filename in os.listdir(maps_dir):
                 if filename.endswith(".npy"):
                     rank = filename[:-4]
                     tree.canonical_maps[rank] = np.load(os.path.join(maps_dir, filename))
+        
+        # Re-initialize vectorized caches
+        tree._prepare_vectorized_caches()
         
         logger.info("Loaded taxonomy cache:")
         logger.info(f"  Version:       {saved_version}")
