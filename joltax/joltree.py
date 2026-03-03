@@ -719,21 +719,21 @@ class JolTree:
         if not isinstance(ids2, (list, np.ndarray)):
             raise TypeError(f"ids2 must be a list or numpy array, got {type(ids2).__name__}")
             
-        ids1 = np.array(ids1, dtype=np.int32)
-        ids2 = np.array(ids2, dtype=np.int32)
+        ids1_arr = np.array(ids1, dtype=np.int32)
+        ids2_arr = np.array(ids2, dtype=np.int32)
         
-        if ids1.shape != ids2.shape:
+        if ids1_arr.shape != ids2_arr.shape:
             raise ValueError("Input arrays must have the same shape.")
             
         self._ensure_up_table()
         assert self._up_table is not None, "up_table must be initialized"
         
-        idx1 = self._get_indices(ids1)
-        idx2 = self._get_indices(ids2)
+        idx1 = self._get_indices(ids1_arr)
+        idx2 = self._get_indices(ids2_arr)
         
         if strict:
-            missing1 = ids1[idx1 == -1]
-            missing2 = ids2[idx2 == -1]
+            missing1 = ids1_arr[idx1 == -1]
+            missing2 = ids2_arr[idx2 == -1]
             if len(missing1) > 0 or len(missing2) > 0:
                 first_missing = missing1[0] if len(missing1) > 0 else missing2[0]
                 raise TaxIDNotFoundError(f"TaxID {first_missing} (and possibly others) not found in taxonomy tree.")
@@ -799,19 +799,19 @@ class JolTree:
         if not isinstance(ids2, (list, np.ndarray)):
             raise TypeError(f"ids2 must be a list or numpy array, got {type(ids2).__name__}")
             
-        ids1 = np.array(ids1, dtype=np.int32)
-        ids2 = np.array(ids2, dtype=np.int32)
+        ids1_arr = np.array(ids1, dtype=np.int32)
+        ids2_arr = np.array(ids2, dtype=np.int32)
         
-        lca_ids = self.get_lca_batch(ids1, ids2, strict=strict)
+        lca_ids = self.get_lca_batch(ids1_arr, ids2_arr, strict=strict)
         
-        idx1 = self._get_indices(ids1)
-        idx2 = self._get_indices(ids2)
+        idx1 = self._get_indices(ids1_arr)
+        idx2 = self._get_indices(ids2_arr)
         idx_lca = self._get_indices(lca_ids)
         
         # Mask invalid lookups
         valid = (idx1 != -1) & (idx2 != -1) & (idx_lca != -1)
         
-        dists = np.full(len(ids1), -1, dtype=np.int32)
+        dists = np.full(len(ids1_arr), -1, dtype=np.int32)
         if np.any(valid):
             v1, v2, vl = idx1[valid], idx2[valid], idx_lca[valid]
             dists[valid] = self.depths[v1] + self.depths[v2] - 2 * self.depths[vl]
@@ -843,11 +843,11 @@ class JolTree:
         if isinstance(tax_ids, (int, np.integer)):
             tax_ids = [int(tax_ids)]
             
-        tax_ids_arr = np.array(tax_ids, dtype=np.int32)
-        indices = self._get_indices(tax_ids_arr)
+        ids_arr = np.array(tax_ids, dtype=np.int32)
+        indices = self._get_indices(ids_arr)
         
         if strict:
-            missing = tax_ids_arr[indices == -1]
+            missing = ids_arr[indices == -1]
             if len(missing) > 0:
                 raise TaxIDNotFoundError(f"TaxID {missing[0]} (and possibly others) not found in taxonomy tree.")
 
@@ -864,11 +864,11 @@ class JolTree:
         if self._sci_names_lookup is None:
             self._prepare_vectorized_caches()
             
-        df_dict = {"tax_id": tax_ids_arr}
+        df_dict = {"tax_id": ids_arr}
         
         for rank in canonical_columns:
             # canonical_maps now store internal indices
-            ancestor_indices = np.full(len(tax_ids_arr), -1, dtype=np.int32)
+            ancestor_indices = np.full(len(ids_arr), -1, dtype=np.int32)
             # Map input tax_ids to their ancestor's internal index
             ancestor_indices[valid_mask] = self.canonical_maps[rank][indices[valid_mask]]
             
