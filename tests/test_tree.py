@@ -7,7 +7,7 @@ import polars as pl
 # Add the project root to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from joltax.joltree import JolTree
+from joltax.joltree import JolTree, TaxIDNotFoundError
 
 class TestJolTree(unittest.TestCase):
     @classmethod
@@ -87,8 +87,6 @@ class TestJolTree(unittest.TestCase):
         self.assertEqual(self.tree.get_lca(562, 562), 562)
         # LCA with root
         self.assertEqual(self.tree.get_lca(562, 1), 1)
-        # LCA with missing node (should return 1 as per implementation)
-        self.assertEqual(self.tree.get_lca(562, 999999), 1)
 
     def test_annotate_table_missing_ranks(self):
         """Test mass annotation when nodes are missing certain canonical ranks."""
@@ -153,9 +151,6 @@ class TestJolTree(unittest.TestCase):
         self.assertEqual(self.tree.get_rank(562), 'species')
         self.assertEqual(self.tree.get_name(2), 'Bacteria')
         self.assertEqual(self.tree.get_rank(2), 'superkingdom')
-        # Test unknown
-        self.assertEqual(self.tree.get_name(999999), 'Unknown_999999')
-        self.assertEqual(self.tree.get_rank(999999), 'unknown')
 
     def test_annotate_table(self):
         tax_ids = [562, 561, 2]
@@ -230,6 +225,74 @@ class TestJolTree(unittest.TestCase):
         
         self.assertIn("Incompatible taxonomy cache", str(cm.exception))
         shutil.rmtree(cache_dir)
+
+class TestErrorHandling(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.names = 'tests/data/names.dmp'
+        cls.nodes = 'tests/data/nodes.dmp'
+        cls.tree = JolTree(nodes=cls.nodes, names=cls.names)
+
+    def test_invalid_taxid_raises_error(self):
+        """Verify that invalid TaxIDs raise TaxIDNotFoundError by default."""
+        invalid_id = 999999
+        with self.assertRaises(TaxIDNotFoundError):
+            self.tree.get_name(invalid_id)
+        with self.assertRaises(TaxIDNotFoundError):
+            self.tree.get_rank(invalid_id)
+        with self.assertRaises(TaxIDNotFoundError):
+            self.tree.get_lineage(invalid_id)
+        with self.assertRaises(TaxIDNotFoundError):
+            self.tree.get_clade(invalid_id)
+        with self.assertRaises(TaxIDNotFoundError):
+            self.tree.get_lca(562, invalid_id)
+
+    def test_valid_taxid_missing_common_name_returns_none(self):
+        """Verify that valid TaxIDs with missing common names return None (no error)."""
+        # ID 2 (Bacteria) has no common name in the test data
+        self.assertIsNone(self.tree.get_common_name(2))
+        # It should still raise error if the ID itself is missing
+        with self.assertRaises(TaxIDNotFoundError):
+            self.tree.get_common_name(999999)
+
+    def test_safe_mode_returns_defaults(self):
+        """Verify that strict=False returns standardized safe defaults."""
+        invalid_id = 999999
+        self.assertIsNone(self.tree.get_name(invalid_id, strict=False))
+        self.assertIsNone(self.tree.get_rank(invalid_id, strict=False))
+        self.assertEqual(self.tree.get_lineage(invalid_id, strict=False), [])
+        self.assertEqual(self.tree.get_clade(invalid_id, strict=False), [])
+        self.assertIsNone(self.tree.get_lca(562, invalid_id, strict=False))
+        self.assertIsNone(self.tree.get_distance(562, invalid_id, strict=False))
+
+    def test_batch_strict_mode(self):
+        """Verify that batch methods raise error if any ID is missing in strict mode."""
+        ids1 = [562, 999999]
+        ids2 = [561, 2]
+        with self.assertRaises(TaxIDNotFoundError):
+            self.tree.get_lca_batch(ids1, ids2, strict=True)
+        with self.assertRaises(TaxIDNotFoundError):
+            self.tree.get_distance_batch(ids1, ids2, strict=True)
+        with self.assertRaises(TaxIDNotFoundError):
+            self.tree.annotate_table(ids1, strict=True)
+
+    def test_batch_safe_mode(self):
+        """Verify that batch methods return -1 or null in safe mode."""
+        ids1 = [562, 999999]
+        ids2 = [561, 2]
+        
+        lcas = self.tree.get_lca_batch(ids1, ids2, strict=False)
+        self.assertEqual(lcas[0], 561)
+        self.assertEqual(lcas[1], -1)
+        
+        dists = self.tree.get_distance_batch(ids1, ids2, strict=False)
+        self.assertEqual(dists[0], 1)
+        self.assertEqual(dists[1], -1)
+        
+        df = self.tree.annotate_table(ids1, strict=False)
+        self.assertEqual(len(df), 2)
+        self.assertEqual(df.row(0, named=True)['scientific_name'], 'Escherichia coli')
+        self.assertIsNone(df.row(1, named=True)['scientific_name'])
 
 if __name__ == '__main__':
     # We skip tests if dependencies aren't installed

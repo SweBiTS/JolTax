@@ -48,6 +48,10 @@ RANK_TO_CODE = {
     'species': 'S'
 }
 
+class TaxIDNotFoundError(Exception):
+    """Raised when a requested NCBI TaxID is not found in the taxonomy tree."""
+    pass
+
 class JolTree:
     """
     A high-performance taxonomy representation using vectorized arrays.
@@ -372,16 +376,17 @@ class JolTree:
         valid[mask] = self._index_to_id[indices[mask]] == tax_ids[mask]
         return np.where(valid, indices, -1)
 
-    def get_lineage(self, tax_id: int) -> List[int]:
+    def get_lineage(self, tax_id: int, strict: bool = True) -> List[int]:
         """
         Returns the full path of TaxIDs from the root to the given TaxID.
         
         Args:
             tax_id: The NCBI TaxID to trace.
+            strict: If True, raises TaxIDNotFoundError if the ID is not in the tree.
             
         Returns:
             A list of TaxIDs starting from root (1) down to the query ID.
-            Returns an empty list if the TaxID is not found.
+            Returns an empty list if the TaxID is not found and strict=False.
             
         Example:
             >>> tree.get_lineage(562) # E. coli
@@ -389,7 +394,8 @@ class JolTree:
         """
         idx = self._get_index(tax_id)
         if idx == -1:
-            logger.warning(f"TaxID {tax_id} not found in taxonomy tree.")
+            if strict:
+                raise TaxIDNotFoundError(f"TaxID {tax_id} not found in taxonomy tree.")
             return []
         
         lineage = []
@@ -403,51 +409,62 @@ class JolTree:
             
         return lineage[::-1]
 
-    def get_name(self, tax_id: int) -> str:
+    def get_name(self, tax_id: int, strict: bool = True) -> Optional[str]:
         """
         Returns the scientific name for a given NCBI TaxID.
         
         Args:
             tax_id: The NCBI TaxID.
+            strict: If True, raises TaxIDNotFoundError if the ID is not in the tree.
             
         Returns:
-            The scientific name string, or "Unknown_<tax_id>" if not found.
+            The scientific name string, or None if not found and strict=False.
         """
         idx = self._get_index(tax_id)
         if idx != -1:
             return self._scientific_names[idx]
-        return f"Unknown_{tax_id}"
+        
+        if strict:
+            raise TaxIDNotFoundError(f"TaxID {tax_id} not found in taxonomy tree.")
+        return None
 
-    def get_common_name(self, tax_id: int) -> Optional[str]:
+    def get_common_name(self, tax_id: int, strict: bool = True) -> Optional[str]:
         """
         Returns the GenBank common name for a given NCBI TaxID, if available.
         
         Args:
             tax_id: The NCBI TaxID.
+            strict: If True, raises TaxIDNotFoundError if the ID is not in the tree.
             
         Returns:
-            The common name string, or None if not available.
+            The common name string, or None if not available or if strict=False and ID is missing.
         """
         idx = self._get_index(tax_id)
         if idx != -1:
             return self._common_names[idx]
+        
+        if strict:
+            raise TaxIDNotFoundError(f"TaxID {tax_id} not found in taxonomy tree.")
         return None
 
-    def get_rank(self, tax_id: int) -> str:
+    def get_rank(self, tax_id: int, strict: bool = True) -> Optional[str]:
         """
         Returns the taxonomic rank for a given NCBI TaxID.
         
         Args:
             tax_id: The NCBI TaxID.
+            strict: If True, raises TaxIDNotFoundError if the ID is not in the tree.
             
         Returns:
-            The rank name (e.g., 'species', 'genus'), or 'unknown' if not found.
+            The rank name (e.g., 'species', 'genus'), or None if not found and strict=False.
         """
         idx = self._get_index(tax_id)
-        if idx == -1:
-            logger.warning(f"TaxID {tax_id} not found in taxonomy tree.")
-            return "unknown"
-        return self.rank_names[self.ranks[idx]]
+        if idx != -1:
+            return self.rank_names[self.ranks[idx]]
+        
+        if strict:
+            raise TaxIDNotFoundError(f"TaxID {tax_id} not found in taxonomy tree.")
+        return None
 
     def search_name(self, query: str, fuzzy: bool = False, limit: int = 10, score_cutoff: float = 60.0) -> pl.DataFrame:
         """
@@ -525,7 +542,7 @@ class JolTree:
             
         return pl.DataFrame(data).sort("score", descending=True)
 
-    def get_clade(self, tax_id: int) -> List[int]:
+    def get_clade(self, tax_id: int, strict: bool = True) -> List[int]:
         """
         Returns all TaxIDs in the clade (descendants) rooted at the given TaxID.
         
@@ -533,13 +550,15 @@ class JolTree:
         
         Args:
             tax_id: The root NCBI TaxID of the clade.
+            strict: If True, raises TaxIDNotFoundError if the ID is not in the tree.
             
         Returns:
             A list of NCBI TaxIDs belonging to the clade.
         """
         idx = self._get_index(tax_id)
         if idx == -1:
-            logger.warning(f"TaxID {tax_id} not found in taxonomy tree.")
+            if strict:
+                raise TaxIDNotFoundError(f"TaxID {tax_id} not found in taxonomy tree.")
             return []
         
         entry = self.entry_times[idx]
@@ -548,13 +567,14 @@ class JolTree:
         mask = (self.entry_times >= entry) & (self.entry_times <= exit)
         return self._index_to_id[mask].astype(int).tolist()
 
-    def get_clade_at_rank(self, tax_id: int, rank_name: str) -> List[int]:
+    def get_clade_at_rank(self, tax_id: int, rank_name: str, strict: bool = True) -> List[int]:
         """
         Returns all descendants of a specific rank within the clade rooted at tax_id.
         
         Args:
             tax_id: The root NCBI TaxID of the clade.
             rank_name: The target rank name (e.g., 'species').
+            strict: If True, raises TaxIDNotFoundError if the tax_id is not in the tree.
             
         Returns:
             A list of NCBI TaxIDs of the target rank within the clade.
@@ -565,7 +585,8 @@ class JolTree:
         """
         idx = self._get_index(tax_id)
         if idx == -1:
-            logger.warning(f"TaxID {tax_id} not found in taxonomy tree.")
+            if strict:
+                raise TaxIDNotFoundError(f"TaxID {tax_id} not found in taxonomy tree.")
             return []
         
         try:
@@ -580,7 +601,7 @@ class JolTree:
         mask = (self.entry_times >= entry) & (self.entry_times <= exit) & (self.ranks == target_rank_idx)
         return self._index_to_id[mask].astype(int).tolist()
 
-    def get_lca(self, tax_id_1: int, tax_id_2: int) -> int:
+    def get_lca(self, tax_id_1: int, tax_id_2: int, strict: bool = True) -> Optional[int]:
         """
         Finds the Lowest Common Ancestor (LCA) of two NCBI TaxIDs.
         
@@ -589,16 +610,19 @@ class JolTree:
         Args:
             tax_id_1: First NCBI TaxID.
             tax_id_2: Second NCBI TaxID.
+            strict: If True, raises TaxIDNotFoundError if either ID is missing.
             
         Returns:
-            The NCBI TaxID of the LCA. Returns 1 (Root) if one or both IDs are missing.
+            The NCBI TaxID of the LCA. Returns None if one or both IDs are missing and strict=False.
         """
         idx1 = self._get_index(tax_id_1)
         idx2 = self._get_index(tax_id_2)
         
         if idx1 == -1 or idx2 == -1:
-            logger.warning(f"One or both TaxIDs ({tax_id_1}, {tax_id_2}) not found.")
-            return 1
+            if strict:
+                missing = tax_id_1 if idx1 == -1 else tax_id_2
+                raise TaxIDNotFoundError(f"TaxID {missing} not found in taxonomy tree.")
+            return None
             
         self._ensure_up_table()
         
@@ -624,26 +648,29 @@ class JolTree:
                 
         return int(self._index_to_id[self.parents[idx1]])
 
-    def get_distance(self, tax_id_1: int, tax_id_2: int) -> int:
+    def get_distance(self, tax_id_1: int, tax_id_2: int, strict: bool = True) -> Optional[int]:
         """
         Calculates the distance (number of edges) between two NCBI TaxIDs.
         
         Args:
             tax_id_1: First NCBI TaxID.
             tax_id_2: Second NCBI TaxID.
+            strict: If True, raises TaxIDNotFoundError if either ID is missing.
             
         Returns:
-            The number of edges between the nodes. Returns 0 if nodes are missing.
+            The number of edges between the nodes. Returns None if nodes are missing and strict=False.
         """
-        lca_id = self.get_lca(tax_id_1, tax_id_2)
+        lca_id = self.get_lca(tax_id_1, tax_id_2, strict=strict)
+        if lca_id is None:
+            return None
+            
         idx1 = self._get_index(tax_id_1)
         idx2 = self._get_index(tax_id_2)
         idx_lca = self._get_index(lca_id)
-        if idx1 == -1 or idx2 == -1:
-            return 0
+        
         return int(self.depths[idx1] + self.depths[idx2] - 2 * self.depths[idx_lca])
 
-    def get_lca_batch(self, ids1: Union[List[int], np.ndarray], ids2: Union[List[int], np.ndarray]) -> np.ndarray:
+    def get_lca_batch(self, ids1: Union[List[int], np.ndarray], ids2: Union[List[int], np.ndarray], strict: bool = True) -> np.ndarray:
         """
         Calculates Lowest Common Ancestor for arrays of NCBI TaxIDs.
         
@@ -653,9 +680,10 @@ class JolTree:
         Args:
             ids1: First array of NCBI TaxIDs.
             ids2: Second array of NCBI TaxIDs.
+            strict: If True, raises TaxIDNotFoundError if any ID is missing from the tree.
             
         Returns:
-            A NumPy array of LCA TaxIDs.
+            A NumPy array of LCA TaxIDs. Missing IDs result in -1 if strict=False.
         """
         ids1 = np.array(ids1, dtype=np.int32)
         ids2 = np.array(ids2, dtype=np.int32)
@@ -667,6 +695,13 @@ class JolTree:
         
         idx1 = self._get_indices(ids1)
         idx2 = self._get_indices(ids2)
+        
+        if strict:
+            missing1 = ids1[idx1 == -1]
+            missing2 = ids2[idx2 == -1]
+            if len(missing1) > 0 or len(missing2) > 0:
+                first_missing = missing1[0] if len(missing1) > 0 else missing2[0]
+                raise TaxIDNotFoundError(f"TaxID {first_missing} (and possibly others) not found in taxonomy tree.")
         
         # Handle missing IDs by pointing to root (index 0)
         valid_mask = (idx1 != -1) & (idx2 != -1)
@@ -708,40 +743,42 @@ class JolTree:
             lca_indices[not_same] = self.parents[sub1]
             
         results = self._index_to_id[lca_indices]
-        results[~valid_mask] = 1
+        # Return -1 for pairs involving missing IDs
+        results[~valid_mask] = -1
         return results
 
-    def get_distance_batch(self, ids1: Union[List[int], np.ndarray], ids2: Union[List[int], np.ndarray]) -> np.ndarray:
+    def get_distance_batch(self, ids1: Union[List[int], np.ndarray], ids2: Union[List[int], np.ndarray], strict: bool = True) -> np.ndarray:
         """
         Vectorized distance calculation for arrays of NCBI TaxIDs.
         
         Args:
             ids1: First array of NCBI TaxIDs.
             ids2: Second array of NCBI TaxIDs.
+            strict: If True, raises TaxIDNotFoundError if any ID is missing from the tree.
             
         Returns:
-            A NumPy array of edge distances.
+            A NumPy array of edge distances. Missing IDs result in -1 if strict=False.
         """
         ids1 = np.array(ids1, dtype=np.int32)
         ids2 = np.array(ids2, dtype=np.int32)
         
-        lca_ids = self.get_lca_batch(ids1, ids2)
+        lca_ids = self.get_lca_batch(ids1, ids2, strict=strict)
         
         idx1 = self._get_indices(ids1)
         idx2 = self._get_indices(ids2)
         idx_lca = self._get_indices(lca_ids)
         
-        # Mask invalid lookups to avoid OOB errors
+        # Mask invalid lookups
         valid = (idx1 != -1) & (idx2 != -1) & (idx_lca != -1)
         
-        dists = np.zeros(len(ids1), dtype=np.int32)
+        dists = np.full(len(ids1), -1, dtype=np.int32)
         if np.any(valid):
             v1, v2, vl = idx1[valid], idx2[valid], idx_lca[valid]
             dists[valid] = self.depths[v1] + self.depths[v2] - 2 * self.depths[vl]
             
         return dists
 
-    def annotate_table(self, tax_ids: Union[List[int], np.ndarray]) -> pl.DataFrame:
+    def annotate_table(self, tax_ids: Union[List[int], np.ndarray], strict: bool = True) -> pl.DataFrame:
         """
         Massively annotates a list of TaxIDs with scientific names and canonical ranks.
         
@@ -750,6 +787,7 @@ class JolTree:
         
         Args:
             tax_ids: A list or NumPy array of NCBI TaxIDs to annotate.
+            strict: If True, raises TaxIDNotFoundError if any ID is missing from the tree.
             
         Returns:
             A Polars DataFrame containing columns for each canonical rank,
@@ -765,11 +803,17 @@ class JolTree:
             │ 562    ┆ Bacteria    ┆ None    ┆ Pseudom… ┆ Gammapro… ┆ Enterobac… ┆ Entero… ┆ Escherichia   ┆ Escherichia coli ┆ species │
             └────────┴─────────────┴─────────┴──────────┴───────────┴────────────┴─────────┴───────────────┴──────────────────┴─────────┘
         """
+        tax_ids_arr = np.array(tax_ids, dtype=np.int32)
+        indices = self._get_indices(tax_ids_arr)
+        
+        if strict:
+            missing = tax_ids_arr[indices == -1]
+            if len(missing) > 0:
+                raise TaxIDNotFoundError(f"TaxID {missing[0]} (and possibly others) not found in taxonomy tree.")
+
         logger.info(f"Annotating {len(tax_ids)} taxa...")
         canonical_columns = [self.top_rank] + [r for r in CANONICAL_RANKS if r not in ['superkingdom', 'domain']]
         
-        tax_ids_arr = np.array(tax_ids, dtype=np.int32)
-        indices = self._get_indices(tax_ids_arr)
         valid_mask = indices != -1
         
         # dummy_idx points to the "Unknown/None" entry at the end of the lookup series
