@@ -10,6 +10,7 @@ This file provides the necessary context for Gemini CLI to maintain the architec
 - **Euler Tour Indexing:** Use entry/exit timestamps for $O(1)$ clade range queries.
 - **Binary Lifting:** Use pre-calculated skip tables for $O(\log N)$ LCA and distance calculations.
 - **Error Handling:** All TaxID-based query methods MUST implement a `strict=True` default. If a TaxID is missing from the tree, raise `TaxIDNotFoundError`. If `strict=False`, return standardized "safe" defaults (`None`, `[]`, or `-1`). Missing attributes for valid TaxIDs (e.g., common names) must return `None` and NOT raise an error.
+- **Type Guards:** All public API methods MUST use explicit type guards (e.g., `isinstance(tax_id, (int, np.integer))`) to provide helpful `TypeError` messages for incorrect input types.
 - **2025 Taxonomy Support:** Must handle the `superkingdom` vs `domain` shift. Ranks are auto-detected during build and enforced as mutually exclusive.
 - **Persistence:** Use binary caches (NumPy `.npy` and Pickle for metadata) to avoid re-parsing `.dmp` files.
 

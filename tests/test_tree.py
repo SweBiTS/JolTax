@@ -301,6 +301,45 @@ class TestErrorHandling(unittest.TestCase):
         self.assertEqual(df.row(0, named=True)['scientific_name'], 'Escherichia coli')
         self.assertIsNone(df.row(1, named=True)['scientific_name'])
 
+class TestTypeGuards(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.names = 'tests/data/names.dmp'
+        cls.nodes = 'tests/data/nodes.dmp'
+        cls.tree = JolTree(nodes=cls.nodes, names=cls.names)
+
+    def test_scalar_type_guards(self):
+        """Verify that scalar methods raise TypeError for non-integer TaxIDs."""
+        invalid_input = "562" # String instead of int
+        with self.assertRaises(TypeError):
+            self.tree.get_name(invalid_input)
+        with self.assertRaises(TypeError):
+            self.tree.get_rank(invalid_input)
+        with self.assertRaises(TypeError):
+            self.tree.get_lineage(invalid_input)
+        with self.assertRaises(TypeError):
+            self.tree.get_clade(invalid_input)
+        with self.assertRaises(TypeError):
+            self.tree.get_clade_at_rank(invalid_input, 'species')
+        with self.assertRaises(TypeError):
+            self.tree.get_lca(invalid_input, 561)
+        with self.assertRaises(TypeError):
+            self.tree.get_lca(561, invalid_input)
+
+    def test_batch_type_guards(self):
+        """Verify that batch methods raise TypeError for non-iterable inputs."""
+        invalid_input = 562 # int instead of list/array
+        with self.assertRaises(TypeError):
+            self.tree.get_lca_batch(invalid_input, [561])
+        with self.assertRaises(TypeError):
+            self.tree.get_distance_batch([561], invalid_input)
+
+    def test_annotate_type_guard(self):
+        """Verify that annotate raises TypeError for invalid types."""
+        invalid_input = {"id": 562} # dict instead of int/list/array
+        with self.assertRaises(TypeError):
+            self.tree.annotate(invalid_input)
+
 if __name__ == '__main__':
     # We skip tests if dependencies aren't installed
     try:

@@ -392,6 +392,9 @@ class JolTree:
             >>> tree.get_lineage(562) # E. coli
             [1, 2, 1224, 1236, 91347, 543, 561, 562]
         """
+        if not isinstance(tax_id, (int, np.integer)):
+            raise TypeError(f"TaxID must be an integer, got {type(tax_id).__name__}")
+            
         idx = self._get_index(tax_id)
         if idx == -1:
             if strict:
@@ -420,6 +423,9 @@ class JolTree:
         Returns:
             The scientific name string, or None if not found and strict=False.
         """
+        if not isinstance(tax_id, (int, np.integer)):
+            raise TypeError(f"TaxID must be an integer, got {type(tax_id).__name__}")
+            
         idx = self._get_index(tax_id)
         if idx != -1:
             return self._scientific_names[idx]
@@ -439,6 +445,9 @@ class JolTree:
         Returns:
             The common name string, or None if not available or if strict=False and ID is missing.
         """
+        if not isinstance(tax_id, (int, np.integer)):
+            raise TypeError(f"TaxID must be an integer, got {type(tax_id).__name__}")
+            
         idx = self._get_index(tax_id)
         if idx != -1:
             return self._common_names[idx]
@@ -458,6 +467,9 @@ class JolTree:
         Returns:
             The rank name (e.g., 'species', 'genus'), or None if not found and strict=False.
         """
+        if not isinstance(tax_id, (int, np.integer)):
+            raise TypeError(f"TaxID must be an integer, got {type(tax_id).__name__}")
+            
         idx = self._get_index(tax_id)
         if idx != -1:
             return self.rank_names[self.ranks[idx]]
@@ -555,6 +567,9 @@ class JolTree:
         Returns:
             A list of NCBI TaxIDs belonging to the clade.
         """
+        if not isinstance(tax_id, (int, np.integer)):
+            raise TypeError(f"TaxID must be an integer, got {type(tax_id).__name__}")
+            
         idx = self._get_index(tax_id)
         if idx == -1:
             if strict:
@@ -583,6 +598,9 @@ class JolTree:
             >>> tree.get_clade_at_rank(2, 'phylum') # All phyla in Bacteria
             [1224, 201174, ...]
         """
+        if not isinstance(tax_id, (int, np.integer)):
+            raise TypeError(f"TaxID must be an integer, got {type(tax_id).__name__}")
+            
         idx = self._get_index(tax_id)
         if idx == -1:
             if strict:
@@ -615,6 +633,11 @@ class JolTree:
         Returns:
             The NCBI TaxID of the LCA. Returns None if one or both IDs are missing and strict=False.
         """
+        if not isinstance(tax_id_1, (int, np.integer)):
+            raise TypeError(f"tax_id_1 must be an integer, got {type(tax_id_1).__name__}")
+        if not isinstance(tax_id_2, (int, np.integer)):
+            raise TypeError(f"tax_id_2 must be an integer, got {type(tax_id_2).__name__}")
+            
         idx1 = self._get_index(tax_id_1)
         idx2 = self._get_index(tax_id_2)
         
@@ -660,6 +683,11 @@ class JolTree:
         Returns:
             The number of edges between the nodes. Returns None if nodes are missing and strict=False.
         """
+        if not isinstance(tax_id_1, (int, np.integer)):
+            raise TypeError(f"tax_id_1 must be an integer, got {type(tax_id_1).__name__}")
+        if not isinstance(tax_id_2, (int, np.integer)):
+            raise TypeError(f"tax_id_2 must be an integer, got {type(tax_id_2).__name__}")
+            
         lca_id = self.get_lca(tax_id_1, tax_id_2, strict=strict)
         if lca_id is None:
             return None
@@ -685,6 +713,11 @@ class JolTree:
         Returns:
             A NumPy array of LCA TaxIDs. Missing IDs result in -1 if strict=False.
         """
+        if not isinstance(ids1, (list, np.ndarray)):
+            raise TypeError(f"ids1 must be a list or numpy array, got {type(ids1).__name__}")
+        if not isinstance(ids2, (list, np.ndarray)):
+            raise TypeError(f"ids2 must be a list or numpy array, got {type(ids2).__name__}")
+            
         ids1 = np.array(ids1, dtype=np.int32)
         ids2 = np.array(ids2, dtype=np.int32)
         
@@ -759,6 +792,11 @@ class JolTree:
         Returns:
             A NumPy array of edge distances. Missing IDs result in -1 if strict=False.
         """
+        if not isinstance(ids1, (list, np.ndarray)):
+            raise TypeError(f"ids1 must be a list or numpy array, got {type(ids1).__name__}")
+        if not isinstance(ids2, (list, np.ndarray)):
+            raise TypeError(f"ids2 must be a list or numpy array, got {type(ids2).__name__}")
+            
         ids1 = np.array(ids1, dtype=np.int32)
         ids2 = np.array(ids2, dtype=np.int32)
         
@@ -797,6 +835,9 @@ class JolTree:
             >>> tree.annotate(562) # Single ID works
             >>> tree.annotate([9606, 562]) # Batch works
         """
+        if not isinstance(tax_ids, (int, np.integer, list, np.ndarray)):
+            raise TypeError(f"tax_ids must be an integer, list, or numpy array, got {type(tax_ids).__name__}")
+            
         if isinstance(tax_ids, (int, np.integer)):
             tax_ids = [int(tax_ids)]
             
