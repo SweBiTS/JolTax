@@ -778,15 +778,15 @@ class JolTree:
             
         return dists
 
-    def annotate_table(self, tax_ids: Union[List[int], np.ndarray], strict: bool = True) -> pl.DataFrame:
+    def annotate_table(self, tax_ids: Union[int, List[int], np.ndarray], strict: bool = True) -> pl.DataFrame:
         """
-        Massively annotates a list of TaxIDs with scientific names and canonical ranks.
+        Massively annotates one or more TaxIDs with scientific names and canonical ranks.
         
         Extremely efficient for large tables (e.g., millions of rows) using 
         Polars vectorized 'gather' and pre-calculated canonical rank maps.
         
         Args:
-            tax_ids: A list or NumPy array of NCBI TaxIDs to annotate.
+            tax_ids: A single NCBI TaxID (int) or an iterable (list, NumPy array).
             strict: If True, raises TaxIDNotFoundError if any ID is missing from the tree.
             
         Returns:
@@ -794,15 +794,12 @@ class JolTree:
             plus 'scientific_name' and 'rank'.
             
         Example:
-            >>> tree.annotate_table([9606, 562])
-            shape: (2, 11)
-            ┌────────┬─────────────┬─────────┬──────────┬───────────┬────────────┬─────────┬───────────────┬──────────────────┬─────────┐
-            │ tax_id ┆ domain      ┆ kingdom ┆ phylum   ┆ class     ┆ order      ┆ family  ┆ genus         ┆ scientific_name  ┆ rank    │
-            ╞════════╪═════════════╪═════════╪══════════╪═══════════╪════════════╪═════════╪═══════════════╪══════════════════╪═════════╡
-            │ 9606   ┆ Eukaryota   ┆ Metazoa ┆ Chordata ┆ Mammalia  ┆ Primates   ┆ Hominidae┆ Homo          ┆ Homo sapiens     ┆ species │
-            │ 562    ┆ Bacteria    ┆ None    ┆ Pseudom… ┆ Gammapro… ┆ Enterobac… ┆ Entero… ┆ Escherichia   ┆ Escherichia coli ┆ species │
-            └────────┴─────────────┴─────────┴──────────┴───────────┴────────────┴─────────┴───────────────┴──────────────────┴─────────┘
+            >>> tree.annotate_table(562) # Single ID works
+            >>> tree.annotate_table([9606, 562]) # Batch works
         """
+        if isinstance(tax_ids, (int, np.integer)):
+            tax_ids = [int(tax_ids)]
+            
         tax_ids_arr = np.array(tax_ids, dtype=np.int32)
         indices = self._get_indices(tax_ids_arr)
         

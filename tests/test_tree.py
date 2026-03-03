@@ -166,6 +166,13 @@ class TestJolTree(unittest.TestCase):
         self.assertEqual(row0['genus'], 'Escherichia')
         self.assertEqual(row0['scientific_name'], 'Escherichia coli')
 
+    def test_annotate_single_id(self):
+        """Test that annotate_table handles a single integer correctly."""
+        df = self.tree.annotate_table(562)
+        self.assertIsInstance(df, pl.DataFrame)
+        self.assertEqual(len(df), 1)
+        self.assertEqual(df.row(0, named=True)['scientific_name'], 'Escherichia coli')
+
     def test_name_search(self):
         # Search by scientific name
         df = self.tree.search_name('Escherichia coli')
