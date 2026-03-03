@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="joltax logo" width="300">
+</p>
+
 # joltax
 
 **High-performance, vectorized NCBI taxonomy library for large-scale bioinformatics research.**
