@@ -1,6 +1,6 @@
-# joltax: User Guide & API Documentation
+# JolTax: User Guide & API Documentation
 
-This guide provides a deep dive into the `joltax` package, its core algorithms, and typical research workflows.
+This guide provides a deep dive into the `joltax` package, its core algorithms, and typical workflows.
 
 ## Table of Contents
 1. [Core Concepts](#core-concepts)
@@ -13,16 +13,16 @@ This guide provides a deep dive into the `joltax` package, its core algorithms, 
 ## Core Concepts
 
 ### Vectorization
-Unlike traditional libraries that store each TaxID as a separate Python object (consuming gigabytes of RAM), `joltax` stores the entire taxonomy in contiguous NumPy arrays. A TaxID becomes a direct index into these arrays, allowing for O(1) attribute lookups and hardware-accelerated batch operations.
+`joltax` stores the entire taxonomy in contiguous NumPy arrays. A TaxID becomes a direct index into these arrays, allowing for O(1) attribute lookups and hardware-accelerated batch operations.
 
-### Memory-Optimized Metadata (v0.1.1)
-Starting in version 0.1.1, all metadata (names, ranks) is stored in a **vectorized String Store** using Polars and Apache Arrow IPC. This reduces the RAM footprint by ~70% and enables zero-copy loading from disk.
+### Metadata Storage (v0.1.1)
+Starting in version 0.1.1, all metadata (names, ranks) is stored in a **vectorized String Store** using Polars and Apache Arrow IPC. This reduces the RAM footprint and enables fast loading from disk.
 
 ### Euler Tour Indexing
-To make clade queries (getting all descendants of a node) instantaneous, `joltax` performs a one-time traversal to assign **Entry** and **Exit** timestamps to every node. A node $v$ is a descendant of $u$ if and only if $entry[u] \le entry[v] \le exit[u]$. This turns a complex tree traversal into a simple numeric range query.
+To make clade queries (getting all descendants of a node) fast, `joltax` performs a one-time traversal to assign **Entry** and **Exit** timestamps to every node. A node $v$ is a descendant of $u$ if and only if $entry[u] \le entry[v] \le exit[u]$. This turns a tree traversal into a numeric range query.
 
-### Hyper-Vectorized Binary Lifting (Skip Tables)
-Finding the Lowest Common Ancestor (LCA) is optimized using binary lifting. Instead of walking up one step at a time, each node stores its $2^k$-th ancestor (2nd, 4th, 8th, 16th, etc.). In version 0.1.1, the table is transposed and hyper-vectorized to support **million-query-per-second batch processing**.
+### Binary Lifting (Skip Tables)
+Finding the Lowest Common Ancestor (LCA) uses binary lifting. Instead of walking up one step at a time, each node stores its $2^k$-th ancestor (2nd, 4th, 8th, 16th, etc.). In version 0.1.1, the table is transposed and vectorized to support **high-throughput batch processing**.
 
 ---
 
@@ -31,25 +31,27 @@ Finding the Lowest Common Ancestor (LCA) is optimized using binary lifting. Inst
 A typical research workflow involving `joltax` consists of three stages: **Build**, **Query**, and **Annotate**.
 
 ### 1. The Build-and-Cache Phase
-You only need to build the tree once from NCBI or GTDB `.dmp` files.
+You only need to build the tree once from NCBI or GTDB `.dmp` files. Currently, JolTax doesn't offer a download option, you will have to get the files yourself.
+
 
 ```python
 import logging
-from joltax.joltree import JolTree
+from joltax import JolTree
 
 # Enable logging to see the build progress
 logging.getLogger('joltax').setLevel(logging.INFO)
 
-# Initial build (takes ~60-90 seconds for full NCBI)
+# Initial build (takes ~60-90 seconds for full the NCBI taxonomy)
+# Option 1: Point to individual nodes.dmp and names.dmp files
 tree = JolTree(
     nodes='taxonomy/nodes.dmp', 
     names='taxonomy/names.dmp'
 )
 
-# OR: Build from a directory containing both nodes.dmp and names.dmp
-tree = JolTree(tax_dir='taxonomy/')
+# Option 2: Point to a directory containing the dmp files
+tree = JolTree('taxonomy/')
 
-# Save to a binary cache directory (uses Arrow IPC for strings)
+# Save to a binary cache directory for later use
 tree.save("ncbi_cache")
 ```
 
@@ -57,9 +59,9 @@ tree.save("ncbi_cache")
 In your daily scripts, you can load the processed cache in under a second. `joltax` automatically validates the cache version to ensure compatibility.
 
 ```python
-from joltax.joltree import JolTree
+from joltax import JolTree
 
-# Near-instant load with zero-copy Arrow IPC
+# Load the taxonomy
 tree = JolTree.load("ncbi_cache")
 
 # PERFORMANCE TIP: For high-throughput API use, pre-warm the LCA cache
@@ -67,7 +69,7 @@ tree._ensure_up_table()
 ```
 
 ### 3. Searching for Taxa by Name
-You can find TaxIDs using exact or fuzzy matching via the optimized Polars search index.
+You can find TaxIDs using exact or fuzzy matching via the Polars search index.
 
 ```python
 # 1. Exact match (O(log N) lookup)
@@ -83,16 +85,16 @@ print(results)
 Suppose you are studying the diversity of a specific genus or family.
 
 ```python
-# 1. Get all nodes within the Bacteria clade (GTDB ID: 5016879)
-bacteria_nodes = tree.get_clade(5016879)
+# 1. Get all nodes within the Bacteria clade (NCBI ID: 2)
+bacteria_nodes = tree.get_clade(2)
 print(f"Total nodes in Bacteria: {len(bacteria_nodes):,}")
 
-# 2. Get only the species within that clade
-bacteria_species = tree.get_clade_at_rank(5016879, 'species')
+# 2. Get only the TaxIDs of rank "species" within that clade
+bacteria_species = tree.get_clade_at_rank(2, 'species')
 print(f"Total unique species in Bacteria: {len(bacteria_species):,}")
 ```
 
-### 5. High-Throughput LCA & Distance (Batching)
+### 5. Batch LCA & Distance (Batching)
 For large-scale comparisons, avoid Python loops and use the vectorized batch methods.
 
 ```python
@@ -107,7 +109,9 @@ dists = tree.get_distance_batch(ids1, ids2)
 ```
 
 ### 6. Annotating a Table
-This is the most common use case for research: turning a column of TaxIDs into a full taxonomic table. `joltax` uses **Polars** for lightning-fast mass annotation.
+A common use case: turning a column of TaxIDs into a full taxonomic table with lineage information. `joltax` uses **Polars** for efficient mass annotation.
+
+Starting in version 0.2.0, all output columns are prefixed with `t_` (e.g., `t_phylum`, `t_scientific_name`) to avoid collisions when joining with your own data. The input TaxID column is renamed to `t_id`.
 
 ```python
 # List of 1,000,000 TaxIDs
@@ -115,6 +119,7 @@ import numpy as np
 tax_ids = np.random.choice(tree._index_to_id, 1000000)
 
 # Mass annotation (under 1 second)
+# Returns columns: ['t_id', 't_domain', ..., 't_scientific_name', 't_rank']
 df = tree.annotate(tax_ids)
 
 # Save to Parquet or CSV using Polars
@@ -126,23 +131,30 @@ Because `joltax` methods are designed to return standardized types (lists of int
 
 ```python
 # Example: Get a full taxonomic table for every genus within the Bacteria clade (TaxID: 2)
-# and immediately save it as a CSV (using Polars one-liners)
+# and immediately filter for those with 't_family' starting with 'Entero'
 (
     tree.annotate(tree.get_clade_at_rank(2, 'genus'))
-    .write_csv("bacterial_genera.csv")
+    .filter(pl.col("t_family").str.starts_with("Entero"))
+    .write_csv("entero_genera.csv")
 )
 ```
-This pattern is extremely efficient: it avoids Python loops and uses the library's internal vectorized lookups for the entire list at once.
+This pattern is efficient: it avoids Python loops and uses the library's internal vectorized lookups for the entire list at once.
 
 ---
 
 ### 8. Error Handling (Strict vs. Safe Mode)
-By default, `joltax` operates in **Strict Mode** (`strict=True`). If you request metadata or a relationship for a TaxID that does not exist in the tree, it will raise a `TaxIDNotFoundError`.
+By default, `joltax` operates in **Strict Mode** (`strict=True`). 
 
-To handle missing IDs gracefully (e.g., when processing old datasets with deprecated TaxIDs), you can use **Safe Mode** (`strict=False`).
+#### 8.1 `TaxIDNotFoundError`
+If you request metadata or a relationship for a TaxID that does not exist in the tree, it will raise a `TaxIDNotFoundError`.
+
+#### 8.2 `TaxonomyIntegrityError`
+During the `build_from_dmp` phase, `joltax` performs strict validation. If it detects cycles, orphaned nodes, or multiple canonical ranks in a single lineage, it will raise a `TaxonomyIntegrityError`.
+
+To handle missing IDs gracefully during queries (e.g., when processing old datasets with deprecated TaxIDs), you can use **Safe Mode** (`strict=False`).
 
 ```python
-from joltax.joltree import TaxIDNotFoundError
+from joltax import TaxIDNotFoundError
 
 # 1. Default (Strict)
 try:
@@ -165,7 +177,8 @@ lca = tree.get_lca(562, 999999, strict=False) # Returns None
 ### Initialization & Persistence
 
 #### `JolTree(tax_dir=None, nodes=None, names=None)`
-...
+Make a JolTree.
+
 #### `get_name(tax_id: int, strict: bool = True) -> Optional[str]`
 Returns the scientific name of the given TaxID. Raises `TaxIDNotFoundError` if ID is missing and `strict=True`.
 
@@ -188,7 +201,7 @@ Returns all descendants of `tax_id` that belong to the specified rank.
 Finds the Lowest Common Ancestor of two nodes.
 
 #### `get_lca_batch(ids1: np.ndarray, ids2: np.ndarray, strict: bool = True) -> np.ndarray`
-Hyper-vectorized batch LCA calculation. If `strict=False`, missing IDs result in `-1`.
+Vectorized batch LCA calculation. If `strict=False`, missing IDs result in `-1`.
 
 #### `get_distance(tax_id_1: int, tax_id_2: int, strict: bool = True) -> Optional[int]`
 Returns the number of edges (hops) between two nodes.

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "joltax"
-version = "0.1.2"
+version = "0.2.0"
 authors = [
   { name="Daniel Svensson", email="daniel.svensson@umu.se" },
 ]
@@ -23,6 +23,11 @@ dependencies = [
     "numpy>=1.20.0",
     "polars>=0.20.0",
     "rapidfuzz>=3.0.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0",
 ]
 
 [project.urls]

@@ -4,7 +4,7 @@ joltax/joltree.py
 Implementation of a high-performance, vectorized taxonomy tree.
 """
 
-__version__ = "0.1.2"
+__version__ = "0.2.0"
 
 # The minimum version of a saved taxonomy cache that is compatible with this software.
 # Increment this when making breaking changes to the binary layout or metadata structure.
@@ -20,40 +20,18 @@ import numpy as np
 import polars as pl
 from rapidfuzz import process, fuzz, utils
 
+from .constants import CANONICAL_RANKS, RANK_TO_CODE
+from .exceptions import TaxIDNotFoundError, TaxonomyIntegrityError
+
 # Set up logging for the module
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
-
-# Standard canonical ranks in order (highest to lowest)
-# Including both superkingdom and domain for compatibility with pre/post-2025 taxonomies
-CANONICAL_RANKS = [
-    'superkingdom', 'domain', 'kingdom', 'phylum', 
-    'class', 'order', 'family', 'genus', 'species'
-]
-
-# Mapping rank names to standard Kraken-style codes
-RANK_TO_CODE = {
-    'superkingdom': 'D',
-    'domain': 'D',
-    'kingdom': 'K',
-    'phylum': 'P',
-    'class': 'C',
-    'order': 'O',
-    'family': 'F',
-    'genus': 'G',
-    'species': 'S'
-}
-
-class TaxIDNotFoundError(Exception):
-    """Raised when a requested NCBI TaxID is not found in the taxonomy tree."""
-    pass
 
 class JolTree:
     """
     A high-performance taxonomy representation using vectorized arrays.
     
-    This class replaces traditional object-oriented trees with contiguous 
-    NumPy arrays for lightning-fast lookups, traversals, and mass annotations.
+    This class uses contiguous NumPy arrays for fast lookups, traversals, and mass annotations.
     It leverages Polars for memory-efficient string storage and batch processing.
     
     Attributes:
@@ -139,9 +117,12 @@ class JolTree:
         This process involves:
         1. Parsing scientific and common names into a Polars search index.
         2. Detecting the top rank (superkingdom vs domain).
-        3. Creating a dense internal mapping (0 to N-1) for all TaxIDs.
-        4. Calculating node depths and Euler Tour timestamps for instant clade queries.
-        5. Pre-calculating ancestors for all canonical ranks.
+        3. Integrity Check: Validating tree structure (orphans, roots, self-parenting).
+        4. Creating a dense internal mapping (0 to N-1) for all TaxIDs.
+        5. Calculating node depths and Euler Tour timestamps for instant clade queries.
+        6. Integrity Check: Detecting cycles during depth calculation.
+        7. Pre-calculating ancestors for all canonical ranks.
+        8. Integrity Check: Detecting redundant canonical ranks in lineages.
         
         Args:
             nodes: Path to NCBI nodes.dmp.
@@ -149,6 +130,7 @@ class JolTree:
             
         Raises:
             ValueError: If both 'superkingdom' and 'domain' ranks are found.
+            TaxonomyIntegrityError: If the tree is corrupt (cycles, orphans, etc).
         """
         self._source_nodes = os.path.abspath(nodes)
         self._source_names = os.path.abspath(names)
@@ -199,6 +181,16 @@ class JolTree:
                 temp_parents[tax_id] = parent_id
                 temp_ranks[tax_id] = rank
                 all_ranks.add(rank)
+        
+        # 2.0 Integrity Check: Orphans and Multiple Roots
+        if 1 not in temp_parents:
+            raise TaxonomyIntegrityError("TaxID 1 (root) is missing from the taxonomy nodes.")
+            
+        for tid, pid in temp_parents.items():
+            if pid not in temp_parents:
+                raise TaxonomyIntegrityError(f"Node {tid} has parent {pid} which is missing from the taxonomy.")
+            if pid == tid and tid != 1:
+                raise TaxonomyIntegrityError(f"Self-parenting loop detected at node {tid}. Only TaxID 1 should be its own parent.")
         
         # 2.1 Detect top rank (superkingdom vs domain)
         has_sk = 'superkingdom' in all_ranks
@@ -285,6 +277,7 @@ class JolTree:
         for i in range(num_nodes):
             curr_idx = i
             root_idx = 0 # TaxID 1 is always the first in sorted_tax_ids
+            seen_ranks = set()
             while True:
                 rank_name = self.rank_names[self.ranks[curr_idx]]
                 
@@ -294,20 +287,34 @@ class JolTree:
                     mapped_rank = self.top_rank
                 
                 if mapped_rank in self.canonical_maps:
+                    if mapped_rank in seen_ranks:
+                        raise TaxonomyIntegrityError(
+                            f"Multiple nodes of canonical rank '{mapped_rank}' found in lineage of node {self._index_to_id[i]}. "
+                            f"Ancestors: {self._index_to_id[curr_idx]} and another node."
+                        )
+                    seen_ranks.add(mapped_rank)
                     self.canonical_maps[mapped_rank][i] = curr_idx
                 
                 if curr_idx == root_idx:
                     break
                 curr_idx = self.parents[curr_idx]
 
-    def _calculate_depth(self, index: int) -> int:
-        """Recursive depth calculation with memoization."""
+    def _calculate_depth(self, index: int, path: Optional[Set[int]] = None) -> int:
+        """Recursive depth calculation with memoization and cycle detection."""
         if index == 0: # TaxID 1 is always index 0
             return 0
         if self.depths[index] != 0:
             return self.depths[index]
-        
-        d = self._calculate_depth(self.parents[index]) + 1
+            
+        if path is None:
+            path = set()
+            
+        if index in path:
+            raise TaxonomyIntegrityError(f"Cycle detected involving TaxID {self._index_to_id[index]}")
+            
+        path.add(index)
+        d = self._calculate_depth(self.parents[index], path) + 1
+        path.remove(index)
         self.depths[index] = d
         return d
 
@@ -828,8 +835,8 @@ class JolTree:
             strict: If True, raises TaxIDNotFoundError if any ID is missing from the tree.
             
         Returns:
-            A Polars DataFrame containing columns for each canonical rank,
-            plus 'scientific_name' and 'rank'.
+            A Polars DataFrame containing columns for each canonical rank (prefixed with 't_'),
+            plus 't_id', 't_scientific_name' and 't_rank'.
             
         Example:
             >>> tree.annotate(562) # Single ID works
@@ -872,7 +879,7 @@ class JolTree:
         assert rank_names_series is not None
         assert ranks_extended is not None
             
-        df_dict = {"tax_id": ids_arr}
+        df_dict = {"t_id": ids_arr}
         
         for rank in canonical_columns:
             # canonical_maps now store internal indices
@@ -884,17 +891,17 @@ class JolTree:
             safe_anc_indices = np.where(ancestor_indices != -1, ancestor_indices, dummy_idx)
             
             # Vectorized gather from Polars
-            df_dict[rank] = sci_names_lookup.gather(safe_anc_indices.astype(np.int32))
+            df_dict[f"t_{rank}"] = sci_names_lookup.gather(safe_anc_indices.astype(np.int32))
 
         # Scientific name for the input TaxID
-        df_dict["scientific_name"] = sci_names_lookup.gather(safe_indices.astype(np.int32))
+        df_dict["t_scientific_name"] = sci_names_lookup.gather(safe_indices.astype(np.int32))
         
         # Rank for the input TaxID
         target_rank_indices = ranks_extended[safe_indices]
-        df_dict["rank"] = rank_names_series.gather(target_rank_indices.astype(np.int32))
+        df_dict["t_rank"] = rank_names_series.gather(target_rank_indices.astype(np.int32))
         
         df = pl.DataFrame(df_dict)
-        final_order = ['tax_id'] + canonical_columns + ['scientific_name', 'rank']
+        final_order = ['t_id'] + [f"t_{rank}" for rank in canonical_columns] + ['t_scientific_name', 't_rank']
         return df.select(final_order)
 
     @property
