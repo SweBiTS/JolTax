@@ -30,7 +30,7 @@ This file provides the necessary context for Gemini CLI to maintain the architec
 - [x] User documentation in `README.md` and `USAGE.md`.
 
 ## Pending Roadmap
-(No pending core roadmap items at this time. Milestone 0.2.0 finalized all planned architectural features.)
+- [ ] **Join-Safe Search Metadata:** Update the `search_name` method to return columns with the `t_` prefix (e.g., `t_id`, `t_scientific_name`, `t_rank`, `t_score`) to mimic the output of `annotate`. This ensures ecosystem-wide consistency and join-safety without requiring changes to the underlying binary cache schema.
 
 ## Technical Environment
 - **Root Directory:** `/home/daniel/devel/JolTax`
