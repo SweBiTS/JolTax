@@ -30,7 +30,7 @@ This file provides the necessary context for Gemini CLI to maintain the architec
 - [x] User documentation in `README.md` and `USAGE.md`.
 
 ## Pending Roadmap
-1. **Refactor StringMeUp:** Update the original `StringMeUp` repository to use `joltax` as a dependency and remove its internal `taxonomy.py`.
+(No pending core roadmap items at this time. Milestone 0.2.0 finalized all planned architectural features.)
 
 ## Technical Environment
 - **Root Directory:** `/home/daniel/devel/JolTax`
