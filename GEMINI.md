@@ -31,6 +31,8 @@ This file provides the necessary context for Gemini CLI to maintain the architec
 
 ## Pending Roadmap
 - [ ] **Join-Safe Search Metadata:** Update the `search_name` method to return columns with the `t_` prefix (e.g., `t_id`, `t_scientific_name`, `t_rank`, `t_score`) to mimic the output of `annotate`. This ensures ecosystem-wide consistency and join-safety without requiring changes to the underlying binary cache schema.
+- [ ] **Abundance-Weighted DFS Sort:** Implement a `sort_by_weight(tax_ids, weights, cumulative=False)` method. This should perform a hyper-vectorized Pre-order Traversal of the active subtree.
+    - *Context:* The `cumulative` flag determines how weights are propagated. If `True`, weights are treated as pre-aggregated clade values (e.g., Kraken `clade` mode). If `False`, the method must bubble up weights from the leaf-most nodes to their ancestors via summation (e.g., Kraken `taxon`/`canonical` modes). This ensures related clades cluster together in a natural, abundance-prioritized tree layout.
 
 ## Technical Environment
 - **Root Directory:** `/home/daniel/devel/JolTax`
